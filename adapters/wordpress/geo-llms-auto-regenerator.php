@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GEO LLMS Auto Regenerator
  * Description: Auto-regenerate llms.txt and llms-full.txt, scan GEO health, and apply safe fixes.
- * Version: 1.5.0
+ * Version: 1.6.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: aronhouyu
@@ -33,7 +33,7 @@ if (!defined('ABSPATH')) {
 }
 
 final class GEO_LLMS_Auto_Regenerator {
-    const VERSION = '1.5.0';
+    const VERSION = '1.6.0';
     const ADMIN_SLUG = 'geo-llms-auto';
     const EVENT_HOOK = 'geo_llms_autogen_regenerate';
     const OPTION_KEY = 'geo_llms_autogen_last_result';
@@ -64,6 +64,7 @@ final class GEO_LLMS_Auto_Regenerator {
         add_action('admin_menu', array(__CLASS__, 'register_admin_page'));
         add_action('admin_post_geo_llms_regenerate_now', array(__CLASS__, 'handle_manual_regenerate'));
         add_action('admin_post_geo_llms_run_scan', array(__CLASS__, 'handle_run_scan'));
+        add_action('admin_post_geo_llms_run_agent', array(__CLASS__, 'handle_run_agent'));
         add_action('admin_post_geo_llms_preview_safe_fixes', array(__CLASS__, 'handle_preview_safe_fixes'));
         add_action('admin_post_geo_llms_apply_safe_fixes', array(__CLASS__, 'handle_apply_safe_fixes'));
         add_action('admin_post_geo_llms_rollback_safe_fixes', array(__CLASS__, 'handle_rollback_safe_fixes'));
@@ -734,6 +735,7 @@ final class GEO_LLMS_Auto_Regenerator {
             'pinned_refs' => '',
             'excluded_refs' => '',
             'scheduled_scan_enabled' => 0,
+            'agent_mode_enabled' => 0,
             'scheduled_scan_frequency' => 'weekly',
             'scheduled_scan_weekday' => 'mon',
             'scheduled_scan_hour' => 9,
@@ -791,6 +793,7 @@ final class GEO_LLMS_Auto_Regenerator {
         $settings['pinned_refs'] = self::sanitize_ref_lines(isset($input['pinned_refs']) ? $input['pinned_refs'] : '');
         $settings['excluded_refs'] = self::sanitize_ref_lines(isset($input['excluded_refs']) ? $input['excluded_refs'] : '');
         $settings['scheduled_scan_enabled'] = !empty($input['scheduled_scan_enabled']) ? 1 : 0;
+        $settings['agent_mode_enabled'] = !empty($input['agent_mode_enabled']) ? 1 : 0;
         $settings['scheduled_scan_frequency'] = self::sanitize_schedule_frequency(isset($input['scheduled_scan_frequency']) ? $input['scheduled_scan_frequency'] : 'weekly');
         $settings['scheduled_scan_weekday'] = self::sanitize_schedule_weekday(isset($input['scheduled_scan_weekday']) ? $input['scheduled_scan_weekday'] : 'mon');
         $settings['scheduled_scan_hour'] = self::sanitize_schedule_hour(isset($input['scheduled_scan_hour']) ? $input['scheduled_scan_hour'] : 9);
@@ -1950,6 +1953,11 @@ final class GEO_LLMS_Auto_Regenerator {
                         <?php submit_button('立即扫描 GEO', 'secondary', 'submit', false); ?>
                     </form>
                     <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_agent'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_agent">
+                        <?php submit_button('立即运行 GEO Agent', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                         <?php wp_nonce_field('geo_llms_preview_safe_fixes'); ?>
                         <input type="hidden" name="action" value="geo_llms_preview_safe_fixes">
                         <?php submit_button('预览安全修复', 'secondary', 'submit', false); ?>
@@ -2170,6 +2178,10 @@ final class GEO_LLMS_Auto_Regenerator {
                     <label class="geo-checkbox">
                         <input type="checkbox" name="settings[scheduled_scan_enabled]" value="1" <?php checked(!empty($settings['scheduled_scan_enabled'])); ?>>
                         启用定时扫描
+                    </label>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[agent_mode_enabled]" value="1" <?php checked(!empty($settings['agent_mode_enabled'])); ?>>
+                        启用 GEO Agent 闭环（扫描 -> 自动修复 -> 复扫 -> 必要时回滚）
                     </label>
                     <label class="geo-checkbox">
                         <input type="checkbox" name="settings[auto_safe_fix_enabled]" value="1" <?php checked(!empty($settings['auto_safe_fix_enabled'])); ?>>
@@ -2550,6 +2562,29 @@ final class GEO_LLMS_Auto_Regenerator {
         exit;
     }
 
+    public static function handle_run_agent() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_agent');
+        $scan = self::run_agent_cycle(true, 'manual');
+        self::log_event('info', 'manual_agent_triggered');
+
+        $summary = isset($scan['summary']) && is_array($scan['summary']) ? $scan['summary'] : array('pass' => 0, 'warn' => 0, 'fail' => 0);
+        $message = 'GEO Agent 运行完成。通过 ' . (int) $summary['pass'] . '，警告 ' . (int) $summary['warn'] . '，失败 ' . (int) $summary['fail'] . '。';
+        if (!empty($scan['agent']['auto_fix']['applied'])) {
+            $message .= ' 已自动应用安全修复。';
+        }
+        if (!empty($scan['agent']['rollback']['applied'])) {
+            $message .= ' 检测到修复后回归，已自动回滚。';
+        }
+
+        self::set_notice('success', $message);
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
     public static function handle_preview_safe_fixes() {
         if (!current_user_can(self::get_management_capability())) {
             wp_die('Permission denied');
@@ -2766,6 +2801,11 @@ final class GEO_LLMS_Auto_Regenerator {
     }
 
     public static function run_scheduled_scan() {
+        $settings = self::get_settings();
+        if (!empty($settings['agent_mode_enabled'])) {
+            self::run_agent_cycle(true, 'scheduled');
+            return;
+        }
         self::run_scan(true, 'scheduled');
     }
 
@@ -2844,16 +2884,140 @@ final class GEO_LLMS_Auto_Regenerator {
         return $scan;
     }
 
+    private static function run_agent_cycle($persist = true, $trigger = 'scheduled') {
+        $previous_scan = $persist ? get_option(self::SCAN_OPTION_KEY, array()) : array();
+        $settings = self::get_settings();
+        $baseline_scan = self::run_scan(false, 'agent-baseline', false);
+
+        $auto_fix = array(
+            'enabled' => !empty($settings['auto_safe_fix_enabled']),
+            'applied' => false,
+            'time' => current_time('mysql'),
+            'notes' => array(),
+            'setting_changes' => array(),
+            'runtime_actions' => array(),
+        );
+
+        if (self::should_run_auto_safe_fix($trigger, $settings)) {
+            $auto_fix = self::apply_auto_safe_fix_from_scan($baseline_scan, $settings, 'agent-' . $trigger);
+        } else {
+            $auto_fix['notes'][] = '自动安全修复当前未启用或触发条件不满足。';
+        }
+
+        $verify_scan = self::run_scan(false, 'agent-verify', false);
+        $final_scan = $verify_scan;
+        $rollback = array(
+            'applied' => false,
+            'reason' => '',
+            'backup_time' => '',
+        );
+
+        if (!empty($auto_fix['applied']) && self::is_scan_summary_degraded($baseline_scan, $verify_scan)) {
+            $rollback = self::rollback_auto_fix_settings('agent_regression_detected');
+            if (!empty($rollback['applied'])) {
+                $final_scan = self::run_scan(false, 'agent-rollback-verify', false);
+            }
+        }
+
+        $baseline_summary = self::get_scan_summary($baseline_scan);
+        $verify_summary = self::get_scan_summary($verify_scan);
+        $final_summary = self::get_scan_summary($final_scan);
+
+        $final_scan['time'] = current_time('mysql');
+        $final_scan['trigger'] = 'agent-' . $trigger;
+        $final_scan['agent'] = array(
+            'time' => current_time('mysql'),
+            'mode' => 'safe-loop',
+            'baseline_summary' => $baseline_summary,
+            'verify_summary' => $verify_summary,
+            'final_summary' => $final_summary,
+            'auto_fix' => $auto_fix,
+            'rollback' => $rollback,
+        );
+
+        $final_scan['trend'] = self::build_scan_trend($final_scan, is_array($previous_scan) ? $previous_scan : array());
+
+        if ($persist) {
+            $notify_trigger = $trigger === 'scheduled' ? 'scheduled' : 'manual';
+            $final_scan['notifications'] = self::maybe_send_scan_notifications($final_scan, $notify_trigger);
+            update_option(self::SCAN_OPTION_KEY, $final_scan, false);
+            self::append_scan_history($final_scan);
+            self::log_event('info', 'agent_cycle_completed', array(
+                'trigger' => $trigger,
+                'auto_fix_applied' => !empty($auto_fix['applied']) ? 1 : 0,
+                'rollback_applied' => !empty($rollback['applied']) ? 1 : 0,
+                'pass' => (int) $final_summary['pass'],
+                'warn' => (int) $final_summary['warn'],
+                'fail' => (int) $final_summary['fail'],
+            ));
+        }
+
+        return $final_scan;
+    }
+
+    private static function get_scan_summary(array $scan) {
+        $summary = isset($scan['summary']) && is_array($scan['summary']) ? $scan['summary'] : array();
+        return array(
+            'pass' => (int) (isset($summary['pass']) ? $summary['pass'] : 0),
+            'warn' => (int) (isset($summary['warn']) ? $summary['warn'] : 0),
+            'fail' => (int) (isset($summary['fail']) ? $summary['fail'] : 0),
+            'info' => (int) (isset($summary['info']) ? $summary['info'] : 0),
+        );
+    }
+
+    private static function is_scan_summary_degraded(array $before_scan, array $after_scan) {
+        $before = self::get_scan_summary($before_scan);
+        $after = self::get_scan_summary($after_scan);
+
+        if ($after['fail'] > $before['fail']) {
+            return true;
+        }
+
+        if ($after['fail'] === $before['fail'] && $after['warn'] > $before['warn']) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static function rollback_auto_fix_settings($reason = '') {
+        $backup = self::get_settings_backup();
+        if (empty($backup['settings']) || !is_array($backup['settings'])) {
+            return array(
+                'applied' => false,
+                'reason' => 'no_backup_snapshot',
+                'backup_time' => '',
+            );
+        }
+
+        $settings = wp_parse_args($backup['settings'], self::get_default_settings());
+        self::save_settings($settings);
+        self::sync_scan_schedule($settings);
+        self::clear_fix_preview();
+        self::regenerate_files();
+        self::log_event('warn', 'agent_auto_fix_rolled_back', array(
+            'reason' => $reason,
+            'backup_time' => isset($backup['time']) ? $backup['time'] : '',
+        ), true);
+
+        return array(
+            'applied' => true,
+            'reason' => $reason ?: 'degraded_after_fix',
+            'backup_time' => isset($backup['time']) ? $backup['time'] : '',
+        );
+    }
+
     private static function should_run_auto_safe_fix($trigger, array $settings) {
         if (empty($settings['auto_safe_fix_enabled'])) {
             return false;
         }
 
-        if ($trigger === 'manual' && empty($settings['auto_safe_fix_on_manual_scan'])) {
+        $trigger_text = (string) $trigger;
+        if (strpos($trigger_text, 'manual') !== false && empty($settings['auto_safe_fix_on_manual_scan'])) {
             return false;
         }
 
-        if (strpos((string) $trigger, 'verify') !== false) {
+        if (strpos($trigger_text, 'verify') !== false) {
             return false;
         }
 

@@ -17,6 +17,7 @@
 - LLMS 规则中心：选择纳入的内容类型与分类、手动 Pin、全局排除规则、单篇自定义 llms 摘要
 - 兼容环境识别：Yoast / Rank Math / AIOSEO / WooCommerce / 静态首页博客页 / Polylang / WPML
 - 定时扫描与历史趋势：支持每日/每周扫描，保存历史结果与趋势变化
+- GEO Agent 闭环：可在定时任务中执行“扫描 -> 自动修复 -> 复扫 -> 回滚”
 - 通知能力：支持邮件与 Webhook，可自定义模板，占位符已预设
 - 缓存联动：重建 llms 后，可选清理 Cloudflare 和常见 WordPress 页面缓存
 - 报告导出：支持导出 Markdown / JSON / CSV GEO 报告
@@ -67,6 +68,7 @@
   - 是否输出基础 schema
   - 扫描后是否自动执行安全修复
   - 手动扫描是否也自动执行安全修复
+  - 是否启用 GEO Agent 闭环模式（定时扫描时生效）
   - 是否启用缓存联动
   - Cloudflare Zone ID / API Token / 清理模式
   - 额外清理 URL

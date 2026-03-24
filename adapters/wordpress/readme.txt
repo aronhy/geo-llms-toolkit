@@ -4,7 +4,7 @@ Tags: seo, llms, schema, sitemap, cloudflare
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.5.0
+Stable tag: 1.6.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -24,6 +24,7 @@ Main features:
 * Safe-fix mode levels: `Strict` (default, low-risk only, no H1/H2/CSS/UI changes) and `Balanced` (adds fallback OG/Twitter + Schema when needed).
 * LLMS rule center with post type filters, taxonomy filters, manual pinning, exclusions, and per-post custom LLMS summary.
 * Scheduled scans with history, trend tracking, email/webhook alerts, and Markdown/JSON/CSV report export.
+* Optional GEO Agent loop for scheduled runs: scan, safe auto-fix, verify, and rollback on regression.
 * Optional cache integration for common WordPress page cache plugins and Cloudflare cache purge.
 * Settings import/export, uninstall cleanup, event logs, capability control, and basic i18n loading.
 
@@ -120,6 +121,13 @@ Service terms and privacy:
 
 == Changelog ==
 
+= 1.6.0 =
+
+* Added GEO Agent loop mode for scheduled runs (`scan -> auto-fix -> verify -> rollback if degraded`).
+* Added manual `Run GEO Agent` action in plugin admin.
+* Added `agent_mode_enabled` setting to switch scheduled scans to agent loop mode.
+* Updated plugin version and distribution metadata to 1.6.0.
+
 = 1.5.0 =
 
 * Added issue-driven auto-fix mode after scans (configurable).
@@ -158,6 +166,10 @@ Service terms and privacy:
 * Initial public release with automatic LLMS regeneration.
 
 == Upgrade Notice ==
+
+= 1.6.0 =
+
+Adds optional GEO Agent closed-loop automation for scheduled runs with automatic rollback guardrails.
 
 = 1.5.0 =
 
