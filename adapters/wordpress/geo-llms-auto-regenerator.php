@@ -726,6 +726,7 @@ final class GEO_LLMS_Auto_Regenerator {
             'enable_low_value_noindex' => 0,
             'enable_llms_link_tag' => 1,
             'enable_wp_endpoint_fix' => 0,
+            'safe_fix_mode' => 'strict',
             'enable_fallback_social_meta' => 0,
             'enable_fallback_schema_markup' => 0,
             'included_post_types' => array('post'),
@@ -782,6 +783,7 @@ final class GEO_LLMS_Auto_Regenerator {
         $settings['enable_low_value_noindex'] = !empty($input['enable_low_value_noindex']) ? 1 : 0;
         $settings['enable_llms_link_tag'] = !empty($input['enable_llms_link_tag']) ? 1 : 0;
         $settings['enable_wp_endpoint_fix'] = !empty($input['enable_wp_endpoint_fix']) ? 1 : 0;
+        $settings['safe_fix_mode'] = self::sanitize_safe_fix_mode(isset($input['safe_fix_mode']) ? $input['safe_fix_mode'] : 'strict');
         $settings['enable_fallback_social_meta'] = !empty($input['enable_fallback_social_meta']) ? 1 : 0;
         $settings['enable_fallback_schema_markup'] = !empty($input['enable_fallback_schema_markup']) ? 1 : 0;
         $settings['included_post_types'] = self::sanitize_selected_post_types(isset($input['included_post_types']) ? $input['included_post_types'] : array());
@@ -884,6 +886,11 @@ final class GEO_LLMS_Auto_Regenerator {
     private static function sanitize_cache_purge_mode($value) {
         $value = sanitize_key((string) $value);
         return in_array($value, array('selected', 'everything'), true) ? $value : 'selected';
+    }
+
+    private static function sanitize_safe_fix_mode($value) {
+        $value = sanitize_key((string) $value);
+        return in_array($value, array('strict', 'balanced'), true) ? $value : 'strict';
     }
 
     private static function sanitize_template_text($value, $multiline) {
@@ -1590,6 +1597,7 @@ final class GEO_LLMS_Auto_Regenerator {
         $target = $settings;
         $changes = array();
         $skipped = array();
+        $safe_fix_mode = self::sanitize_safe_fix_mode(isset($settings['safe_fix_mode']) ? $settings['safe_fix_mode'] : 'strict');
 
         $plans = array(
             'exclude_low_value_from_llms' => array(
@@ -1614,7 +1622,7 @@ final class GEO_LLMS_Auto_Regenerator {
             ),
         );
 
-        if (empty($integration['seo_plugins'])) {
+        if (empty($integration['seo_plugins']) && $safe_fix_mode === 'balanced') {
             $plans['enable_fallback_social_meta'] = array(
                 'label' => '基础 OG / Twitter',
                 'target' => 1,
@@ -1625,6 +1633,8 @@ final class GEO_LLMS_Auto_Regenerator {
                 'target' => 1,
                 'reason' => '当前未检测到 SEO 插件，由本插件补基础结构化数据。',
             );
+        } elseif ($safe_fix_mode !== 'balanced') {
+            $skipped[] = '当前是严格安全模式（Strict），不会自动启用 OG/Twitter 与 Schema 补全。';
         } else {
             $skipped[] = '检测到 SEO 插件：' . implode(' / ', $integration['seo_plugins']) . '，预设不会强行打开基础 OG/Twitter 与 Schema。';
         }
@@ -2076,6 +2086,14 @@ final class GEO_LLMS_Auto_Regenerator {
                     <p class="geo-help">每行一个，支持文章 ID、URL、路径或 slug。命中后会从 llms 里移除。</p>
 
                     <h3>安全修复</h3>
+                    <p>
+                        <label for="geo-safe-fix-mode"><strong>安全修复模式</strong></label><br>
+                        <select id="geo-safe-fix-mode" name="settings[safe_fix_mode]">
+                            <option value="strict" <?php selected(isset($settings['safe_fix_mode']) ? $settings['safe_fix_mode'] : 'strict', 'strict'); ?>>Strict（仅低风险修复）</option>
+                            <option value="balanced" <?php selected(isset($settings['safe_fix_mode']) ? $settings['safe_fix_mode'] : 'strict', 'balanced'); ?>>Balanced（额外补 OG/Schema）</option>
+                        </select>
+                    </p>
+                    <p class="geo-help">Strict 不会自动修复 H1/H2 等结构标签，也不会改 CSS/UI。Balanced 仅额外启用 head 层 OG/Schema 补全，不改模板结构。</p>
                     <label class="geo-checkbox">
                         <input type="checkbox" name="settings[exclude_low_value_from_llms]" value="1" <?php checked(!empty($settings['exclude_low_value_from_llms'])); ?>>
                         生成 llms 时排除低价值页、空标题页、示例页
@@ -2909,6 +2927,7 @@ final class GEO_LLMS_Auto_Regenerator {
         $setting_changes = array();
         $runtime_actions = array();
         $notes = array();
+        $safe_fix_mode = self::sanitize_safe_fix_mode(isset($settings['safe_fix_mode']) ? $settings['safe_fix_mode'] : 'strict');
 
         $llms_endpoint_issue = self::scan_has_issue($scan, 'endpoint_checks', array('llms.txt', 'llms-full.txt'), array('fail'));
         if ($llms_endpoint_issue && self::llms_root_files_missing_or_empty()) {
@@ -2947,6 +2966,32 @@ final class GEO_LLMS_Auto_Regenerator {
                 'to' => 1,
                 'reason' => '检测到 robots/sitemap 端点异常，自动启用 WP 端点兜底修复。',
             );
+        }
+
+        if ($safe_fix_mode === 'balanced' && !self::detect_supported_seo_plugin()) {
+            $social_issue = self::scan_has_issue($scan, 'signal_checks', array('首页 OG / Twitter', 'OG Image'), array('fail', 'warn'));
+            if ($social_issue && empty($settings['enable_fallback_social_meta'])) {
+                $setting_changes[] = array(
+                    'key' => 'enable_fallback_social_meta',
+                    'label' => '基础 OG / Twitter',
+                    'from' => 0,
+                    'to' => 1,
+                    'reason' => 'Balanced 模式下检测到社交标签缺口，自动启用基础 OG/Twitter 补全。',
+                );
+            }
+
+            $schema_issue = self::scan_has_issue($scan, 'signal_checks', array('文章 Article Schema', 'Breadcrumb Schema'), array('fail', 'warn'));
+            if ($schema_issue && empty($settings['enable_fallback_schema_markup'])) {
+                $setting_changes[] = array(
+                    'key' => 'enable_fallback_schema_markup',
+                    'label' => '基础 Schema',
+                    'from' => 0,
+                    'to' => 1,
+                    'reason' => 'Balanced 模式下检测到结构化数据缺口，自动启用基础 Schema 补全。',
+                );
+            }
+        } elseif ($safe_fix_mode !== 'balanced') {
+            $notes[] = 'Strict 模式不会自动修复 OG/Twitter、Schema、H1/H2 结构等高风险项。';
         }
 
         return array(

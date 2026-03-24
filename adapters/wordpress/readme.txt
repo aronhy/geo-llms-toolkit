@@ -21,6 +21,7 @@ Main features:
 * Scan key GEO/SEO signals: homepage H1, `link rel="llms"`, canonical, OG/Twitter, `og:image`, article schema, author page signals, breadcrumb schema, soft 404 behavior, `noindex` conflicts, and homepage/article fetch consistency.
 * Safe-fix workflow with preview, apply, rollback, and restore defaults.
 * Optional issue-driven auto-fix after scans: regenerate missing LLMS files, enforce homepage LLMS link output, enable low-value noindex, and enable WP-layer endpoint fallback for robots/sitemaps.
+* Safe-fix mode levels: `Strict` (default, low-risk only, no H1/H2/CSS/UI changes) and `Balanced` (adds fallback OG/Twitter + Schema when needed).
 * LLMS rule center with post type filters, taxonomy filters, manual pinning, exclusions, and per-post custom LLMS summary.
 * Scheduled scans with history, trend tracking, email/webhook alerts, and Markdown/JSON/CSV report export.
 * Optional cache integration for common WordPress page cache plugins and Cloudflare cache purge.
@@ -118,6 +119,7 @@ Service terms and privacy:
 = 1.5.0 =
 
 * Added issue-driven auto-fix mode after scans (configurable).
+* Added safe-fix mode levels (`Strict` / `Balanced`) to control automatic fix scope.
 * Added automatic LLMS file regeneration when scan finds llms endpoints broken and root files are missing/empty.
 * Added configurable homepage LLMS link output switch and auto-fix hook.
 * Added WP-layer endpoint fallback fixer for `robots.txt`, `sitemap.xml`, `sitemap_index.xml`, `wp-sitemap.xml`.

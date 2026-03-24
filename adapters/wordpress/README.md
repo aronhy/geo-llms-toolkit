@@ -11,6 +11,7 @@
 - SEO / GEO 信号扫描：首页 `H1`、首页 `<link rel="llms" href="/llms.txt">`、`canonical`、`og:*` / `twitter:*`、`og:image`、文章 `Article` schema、作者页信号、`BreadcrumbList`、`Organization.sameAs`、软 404、`noindex` 冲突、首页/文章页抓取一致性、低价值页 `noindex`
 - 一键安全修复：启用低价值 llms 过滤、低价值页 `noindex`、基础 OG/Twitter 与 schema 补全（未检测到常见 SEO 插件时）
 - 自动安全修复：扫描后根据问题自动执行（llms 缺失重建、LLMS Link 注入、低价值页 noindex、WP 层端点修复）
+- 安全模式分级：`Strict`（默认，只做低风险，不动 H1/H2/CSS/UI）与 `Balanced`（额外补 OG/Twitter + Schema）
 - 安全修复预览：`dry run`、预计变更说明、回滚上次修复、恢复默认设置
 - 前台输出：首页 `<head>` 自动声明 `llms.txt` 位置
 - LLMS 规则中心：选择纳入的内容类型与分类、手动 Pin、全局排除规则、单篇自定义 llms 摘要
@@ -55,6 +56,7 @@
   - 全局排除规则
   - llms 是否排除低价值页
   - 低价值页是否自动 `noindex`
+  - 安全修复模式（Strict / Balanced）
   - 是否自动输出首页 LLMS Link
   - 是否启用 WP 层端点修复（robots/sitemap）
   - 是否输出基础 OG/Twitter
