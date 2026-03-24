@@ -54,3 +54,8 @@ See adapter docs:
 ## Roadmap
 
 See [docs/roadmap.md](./docs/roadmap.md).
+
+## Follow
+
+- X: https://x.com/aronhouyu
+- YouTube: https://www.youtube.com/@aronhouyu1024
