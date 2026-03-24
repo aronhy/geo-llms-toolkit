@@ -38,7 +38,14 @@ WordPress adapter is still included in this repository:
 
 Install docs: [adapters/wordpress/readme.txt](./adapters/wordpress/readme.txt)
 
-## 3) Repository layout
+## 3) Latest updates (WordPress 1.6.0)
+
+- **Issue-driven auto safe-fix**: regenerate missing `llms.txt` / `llms-full.txt`, enforce homepage `<link rel="llms" href="/llms.txt">`, enable low-value page `noindex`, and enable WP-layer endpoint fallback for `robots.txt` / `sitemap.xml` / `sitemap_index.xml` / `wp-sitemap.xml`.
+- **Safe-fix mode levels**: `Strict` (default, low-risk only, no H1/H2/CSS/UI structural edits) and `Balanced` (extends with fallback OG/Twitter + Schema output without changing template structure).
+- **GEO Agent loop mode**: supports `scan -> auto-fix -> verify -> rollback if degraded`, with manual action button and scheduled mode switch.
+- **WordPress release ZIP packaging**: build with `./scripts/build-wordpress-zip.sh`; latest package in repo is `dist/geo-llms-auto-regenerator-1.6.0.zip`.
+
+## 4) Repository layout
 
 ```text
 geo-llms-toolkit/
@@ -55,7 +62,7 @@ geo-llms-toolkit/
   examples/
 ```
 
-## 4) Common dev commands
+## 5) Common dev commands
 
 ```bash
 # WordPress adapter lint
