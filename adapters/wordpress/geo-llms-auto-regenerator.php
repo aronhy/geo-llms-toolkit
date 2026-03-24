@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GEO LLMS Auto Regenerator
  * Description: Auto-regenerate llms.txt and llms-full.txt, scan GEO health, and apply safe fixes.
- * Version: 1.4.0
+ * Version: 1.5.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: aronhouyu
@@ -33,7 +33,7 @@ if (!defined('ABSPATH')) {
 }
 
 final class GEO_LLMS_Auto_Regenerator {
-    const VERSION = '1.4.0';
+    const VERSION = '1.5.0';
     const ADMIN_SLUG = 'geo-llms-auto';
     const EVENT_HOOK = 'geo_llms_autogen_regenerate';
     const OPTION_KEY = 'geo_llms_autogen_last_result';
@@ -82,6 +82,8 @@ final class GEO_LLMS_Auto_Regenerator {
         add_action('send_headers', array(__CLASS__, 'send_x_robots_header'));
         add_action('login_init', array(__CLASS__, 'send_login_noindex_header'));
         add_action('login_head', array(__CLASS__, 'render_login_noindex_meta'));
+        add_filter('redirect_canonical', array(__CLASS__, 'filter_endpoint_canonical_redirect'), 10, 2);
+        add_action('template_redirect', array(__CLASS__, 'maybe_serve_endpoint_fallbacks'), 0);
         add_action('wp_head', array(__CLASS__, 'output_llms_link_tag'), 1);
         add_action('wp_head', array(__CLASS__, 'output_fallback_social_meta'), 1);
         add_action('wp_head', array(__CLASS__, 'output_fallback_schema_markup'), 99);
@@ -722,6 +724,8 @@ final class GEO_LLMS_Auto_Regenerator {
             'cleanup_on_uninstall' => 0,
             'exclude_low_value_from_llms' => 1,
             'enable_low_value_noindex' => 0,
+            'enable_llms_link_tag' => 1,
+            'enable_wp_endpoint_fix' => 0,
             'enable_fallback_social_meta' => 0,
             'enable_fallback_schema_markup' => 0,
             'included_post_types' => array('post'),
@@ -732,6 +736,8 @@ final class GEO_LLMS_Auto_Regenerator {
             'scheduled_scan_frequency' => 'weekly',
             'scheduled_scan_weekday' => 'mon',
             'scheduled_scan_hour' => 9,
+            'auto_safe_fix_enabled' => 0,
+            'auto_safe_fix_on_manual_scan' => 0,
             'scan_history_limit' => 20,
             'notify_on_warn' => 1,
             'notify_on_fail' => 1,
@@ -774,6 +780,8 @@ final class GEO_LLMS_Auto_Regenerator {
         $settings['cleanup_on_uninstall'] = !empty($input['cleanup_on_uninstall']) ? 1 : 0;
         $settings['exclude_low_value_from_llms'] = !empty($input['exclude_low_value_from_llms']) ? 1 : 0;
         $settings['enable_low_value_noindex'] = !empty($input['enable_low_value_noindex']) ? 1 : 0;
+        $settings['enable_llms_link_tag'] = !empty($input['enable_llms_link_tag']) ? 1 : 0;
+        $settings['enable_wp_endpoint_fix'] = !empty($input['enable_wp_endpoint_fix']) ? 1 : 0;
         $settings['enable_fallback_social_meta'] = !empty($input['enable_fallback_social_meta']) ? 1 : 0;
         $settings['enable_fallback_schema_markup'] = !empty($input['enable_fallback_schema_markup']) ? 1 : 0;
         $settings['included_post_types'] = self::sanitize_selected_post_types(isset($input['included_post_types']) ? $input['included_post_types'] : array());
@@ -784,6 +792,8 @@ final class GEO_LLMS_Auto_Regenerator {
         $settings['scheduled_scan_frequency'] = self::sanitize_schedule_frequency(isset($input['scheduled_scan_frequency']) ? $input['scheduled_scan_frequency'] : 'weekly');
         $settings['scheduled_scan_weekday'] = self::sanitize_schedule_weekday(isset($input['scheduled_scan_weekday']) ? $input['scheduled_scan_weekday'] : 'mon');
         $settings['scheduled_scan_hour'] = self::sanitize_schedule_hour(isset($input['scheduled_scan_hour']) ? $input['scheduled_scan_hour'] : 9);
+        $settings['auto_safe_fix_enabled'] = !empty($input['auto_safe_fix_enabled']) ? 1 : 0;
+        $settings['auto_safe_fix_on_manual_scan'] = !empty($input['auto_safe_fix_on_manual_scan']) ? 1 : 0;
         $settings['scan_history_limit'] = self::sanitize_history_limit(isset($input['scan_history_limit']) ? $input['scan_history_limit'] : 20);
         $settings['notify_on_warn'] = !empty($input['notify_on_warn']) ? 1 : 0;
         $settings['notify_on_fail'] = !empty($input['notify_on_fail']) ? 1 : 0;
@@ -1592,6 +1602,16 @@ final class GEO_LLMS_Auto_Regenerator {
                 'target' => 1,
                 'reason' => '避免登录、找回密码、搜索页等干扰索引。',
             ),
+            'enable_llms_link_tag' => array(
+                'label' => '首页 LLMS Link',
+                'target' => 1,
+                'reason' => '在首页 head 声明 llms.txt 位置，便于爬虫发现。',
+            ),
+            'enable_wp_endpoint_fix' => array(
+                'label' => 'WP 端点修复',
+                'target' => 1,
+                'reason' => '在 WP 层兜底 robots/sitemap 端点，降低 rewrite 冲突影响。',
+            ),
         );
 
         if (empty($integration['seo_plugins'])) {
@@ -1896,6 +1916,11 @@ final class GEO_LLMS_Auto_Regenerator {
                             }
                             ?>
                         </p>
+                        <?php if (!empty($scan['auto_fix']['enabled'])) : ?>
+                            <p class="geo-muted">
+                                自动修复：<?php echo !empty($scan['auto_fix']['applied']) ? '已执行' : '已启用（本次无可修复项）'; ?>
+                            </p>
+                        <?php endif; ?>
                     </div>
                     <div class="geo-metric">
                         <strong>当前网站地址</strong>
@@ -1935,7 +1960,7 @@ final class GEO_LLMS_Auto_Regenerator {
                         <?php submit_button('恢复默认设置', 'delete', 'submit', false); ?>
                     </form>
                 </div>
-                <p class="geo-help">“安全修复”只会启用确定性强的能力：过滤低价值 llms 条目、为低价值页加 noindex、在未检测到常见 SEO 插件时补基础 OG/Twitter 与 schema。</p>
+                <p class="geo-help">“安全修复”只会启用确定性强的能力：缺失 llms 文件自动重建、首页声明 llms link、低价值页 noindex、WP 层端点修复，以及在未检测到常见 SEO 插件时补基础 OG/Twitter 与 schema。</p>
                 <?php if (!empty($backup['time'])) : ?>
                     <p class="geo-help">最近一次可回滚快照：<?php echo esc_html($backup['time']); ?></p>
                 <?php endif; ?>
@@ -2060,6 +2085,14 @@ final class GEO_LLMS_Auto_Regenerator {
                         为低价值页添加 noindex（登录、找回密码、搜索页、购物车/结账/账户页、示例页）
                     </label>
                     <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[enable_llms_link_tag]" value="1" <?php checked(!empty($settings['enable_llms_link_tag'])); ?>>
+                        在首页 <head> 输出 <code>&lt;link rel="llms" href="/llms.txt"&gt;</code>
+                    </label>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[enable_wp_endpoint_fix]" value="1" <?php checked(!empty($settings['enable_wp_endpoint_fix'])); ?>>
+                        启用 WP 层端点修复（robots.txt / sitemap.xml / sitemap_index.xml / wp-sitemap.xml）
+                    </label>
+                    <label class="geo-checkbox">
                         <input type="checkbox" name="settings[enable_fallback_social_meta]" value="1" <?php checked(!empty($settings['enable_fallback_social_meta'])); ?>>
                         补基础 OG / Twitter 标签（仅在未检测到常见 SEO 插件时输出）
                     </label>
@@ -2120,6 +2153,15 @@ final class GEO_LLMS_Auto_Regenerator {
                         <input type="checkbox" name="settings[scheduled_scan_enabled]" value="1" <?php checked(!empty($settings['scheduled_scan_enabled'])); ?>>
                         启用定时扫描
                     </label>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[auto_safe_fix_enabled]" value="1" <?php checked(!empty($settings['auto_safe_fix_enabled'])); ?>>
+                        扫描后自动执行安全修复（仅修复确定项）
+                    </label>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[auto_safe_fix_on_manual_scan]" value="1" <?php checked(!empty($settings['auto_safe_fix_on_manual_scan'])); ?>>
+                        手动扫描时也自动执行安全修复
+                    </label>
+                    <p class="geo-help">当前自动修复仅覆盖 4 个安全项：llms 缺失重建、首页 LLMS Link、低价值页 noindex、WP 端点修复。</p>
                     <p>
                         <label for="geo-scan-frequency"><strong>扫描频率</strong></label><br>
                         <select id="geo-scan-frequency" name="settings[scheduled_scan_frequency]">
@@ -2481,7 +2523,11 @@ final class GEO_LLMS_Auto_Regenerator {
         $scan = self::run_scan(true, 'manual');
         self::log_event('info', 'manual_scan_triggered');
         $summary = isset($scan['summary']) ? $scan['summary'] : array('pass' => 0, 'warn' => 0, 'fail' => 0);
-        self::set_notice('success', 'GEO 扫描完成。通过 ' . (int) $summary['pass'] . '，警告 ' . (int) $summary['warn'] . '，失败 ' . (int) $summary['fail'] . '。');
+        $message = 'GEO 扫描完成。通过 ' . (int) $summary['pass'] . '，警告 ' . (int) $summary['warn'] . '，失败 ' . (int) $summary['fail'] . '。';
+        if (!empty($scan['auto_fix']['applied'])) {
+            $message .= ' 已自动应用安全修复。';
+        }
+        self::set_notice('success', $message);
         wp_safe_redirect(self::get_admin_page_url());
         exit;
     }
@@ -2511,7 +2557,7 @@ final class GEO_LLMS_Auto_Regenerator {
         self::save_settings($settings);
         self::sync_scan_schedule($settings);
         self::regenerate_files();
-        self::run_scan(true, 'manual');
+        self::run_scan(true, 'manual', false);
         self::clear_fix_preview();
         self::log_event('info', 'safe_fixes_applied', array('change_count' => count(isset($plan['changes']) ? $plan['changes'] : array())));
 
@@ -2549,7 +2595,7 @@ final class GEO_LLMS_Auto_Regenerator {
         self::sync_scan_schedule($settings);
         self::save_scan_history(self::get_scan_history(), isset($settings['scan_history_limit']) ? $settings['scan_history_limit'] : 20);
         self::regenerate_files();
-        self::run_scan(true, 'manual');
+        self::run_scan(true, 'manual', false);
         self::clear_fix_preview();
         self::log_event('info', 'safe_fixes_rolled_back', array('backup_time' => isset($backup['time']) ? $backup['time'] : ''));
 
@@ -2705,7 +2751,7 @@ final class GEO_LLMS_Auto_Regenerator {
         self::run_scan(true, 'scheduled');
     }
 
-    private static function run_scan($persist = true, $trigger = 'manual') {
+    private static function run_scan($persist = true, $trigger = 'manual', $allow_auto_fix = true) {
         $previous_scan = $persist ? get_option(self::SCAN_OPTION_KEY, array()) : array();
         $robots_response = self::fetch_url(home_url('/robots.txt'));
         $robots_rules = array();
@@ -2743,6 +2789,26 @@ final class GEO_LLMS_Auto_Regenerator {
             'recommendations' => $recommendations,
         );
 
+        if ($persist && $allow_auto_fix) {
+            $settings = self::get_settings();
+            if (self::should_run_auto_safe_fix($trigger, $settings)) {
+                $auto_fix = self::apply_auto_safe_fix_from_scan($scan, $settings, $trigger);
+                if (!empty($auto_fix['enabled'])) {
+                    $scan['auto_fix'] = $auto_fix;
+                }
+
+                if (!empty($auto_fix['applied'])) {
+                    $verified_scan = self::run_scan(false, $trigger . '-verify', false);
+                    $scan = array_merge($scan, $verified_scan);
+                    $scan['trigger'] = $trigger;
+                    $scan['auto_fix'] = array_merge($auto_fix, array(
+                        'before_summary' => $summary,
+                        'after_summary' => isset($verified_scan['summary']) ? $verified_scan['summary'] : $summary,
+                    ));
+                }
+            }
+        }
+
         $scan['trend'] = self::build_scan_trend($scan, is_array($previous_scan) ? $previous_scan : array());
 
         if ($persist) {
@@ -2758,6 +2824,168 @@ final class GEO_LLMS_Auto_Regenerator {
         }
 
         return $scan;
+    }
+
+    private static function should_run_auto_safe_fix($trigger, array $settings) {
+        if (empty($settings['auto_safe_fix_enabled'])) {
+            return false;
+        }
+
+        if ($trigger === 'manual' && empty($settings['auto_safe_fix_on_manual_scan'])) {
+            return false;
+        }
+
+        if (strpos((string) $trigger, 'verify') !== false) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static function apply_auto_safe_fix_from_scan(array $scan, array $settings, $trigger) {
+        $plan = self::build_issue_driven_fix_plan($scan, $settings);
+        if (empty($plan['setting_changes']) && empty($plan['runtime_actions'])) {
+            return array(
+                'enabled' => true,
+                'applied' => false,
+                'time' => current_time('mysql'),
+                'notes' => array('扫描结果未命中可自动修复项。'),
+                'setting_changes' => array(),
+                'runtime_actions' => array(),
+            );
+        }
+
+        $did_apply = false;
+        $applied_settings = array();
+        $runtime_applied = array();
+        $target_settings = $settings;
+
+        foreach ($plan['setting_changes'] as $change) {
+            $key = isset($change['key']) ? $change['key'] : '';
+            if ($key === '') {
+                continue;
+            }
+            $target_settings[$key] = (int) (isset($change['to']) ? $change['to'] : 0);
+            $applied_settings[] = $change;
+        }
+
+        if (!empty($applied_settings)) {
+            self::backup_current_settings();
+            self::save_settings($target_settings);
+            self::sync_scan_schedule($target_settings);
+            $did_apply = true;
+        }
+
+        if (in_array('regenerate_llms_files', $plan['runtime_actions'], true)) {
+            self::regenerate_files();
+            $runtime_applied[] = 'regenerate_llms_files';
+            $did_apply = true;
+        } elseif (!empty($applied_settings)) {
+            // Settings changed; rebuild llms and purge caches to reduce stale-scan drift.
+            self::regenerate_files();
+            $runtime_applied[] = 'regenerate_llms_files';
+        }
+
+        if ($did_apply) {
+            self::clear_fix_preview();
+            self::log_event('info', 'auto_safe_fixes_applied', array(
+                'trigger' => $trigger,
+                'setting_changes' => count($applied_settings),
+                'runtime_actions' => $runtime_applied,
+            ));
+        }
+
+        return array(
+            'enabled' => true,
+            'applied' => $did_apply,
+            'time' => current_time('mysql'),
+            'notes' => isset($plan['notes']) && is_array($plan['notes']) ? $plan['notes'] : array(),
+            'setting_changes' => $applied_settings,
+            'runtime_actions' => $runtime_applied,
+        );
+    }
+
+    private static function build_issue_driven_fix_plan(array $scan, array $settings) {
+        $setting_changes = array();
+        $runtime_actions = array();
+        $notes = array();
+
+        $llms_endpoint_issue = self::scan_has_issue($scan, 'endpoint_checks', array('llms.txt', 'llms-full.txt'), array('fail'));
+        if ($llms_endpoint_issue && self::llms_root_files_missing_or_empty()) {
+            $runtime_actions[] = 'regenerate_llms_files';
+            $notes[] = '检测到 llms 端点异常且根目录文件缺失/空文件，自动重建 llms 文件。';
+        }
+
+        $llms_link_issue = self::scan_has_issue($scan, 'signal_checks', array('首页 LLMS Link'), array('fail', 'warn'));
+        if ($llms_link_issue && empty($settings['enable_llms_link_tag'])) {
+            $setting_changes[] = array(
+                'key' => 'enable_llms_link_tag',
+                'label' => '首页 LLMS Link',
+                'from' => 0,
+                'to' => 1,
+                'reason' => '首页缺失或异常时，自动启用 <link rel="llms"> 输出。',
+            );
+        }
+
+        $low_value_noindex_issue = self::scan_has_issue($scan, 'signal_checks', array('低价值页 noindex'), array('fail', 'warn'));
+        if ($low_value_noindex_issue && empty($settings['enable_low_value_noindex'])) {
+            $setting_changes[] = array(
+                'key' => 'enable_low_value_noindex',
+                'label' => '低价值页 noindex',
+                'from' => 0,
+                'to' => 1,
+                'reason' => '检测到低价值页未 noindex，自动启用 noindex 规则。',
+            );
+        }
+
+        $endpoint_issue = self::scan_has_issue($scan, 'endpoint_checks', array('robots.txt', 'sitemap.xml', 'sitemap_index.xml', 'wp-sitemap.xml'), array('fail'));
+        if ($endpoint_issue && empty($settings['enable_wp_endpoint_fix'])) {
+            $setting_changes[] = array(
+                'key' => 'enable_wp_endpoint_fix',
+                'label' => 'WP 端点修复',
+                'from' => 0,
+                'to' => 1,
+                'reason' => '检测到 robots/sitemap 端点异常，自动启用 WP 端点兜底修复。',
+            );
+        }
+
+        return array(
+            'setting_changes' => $setting_changes,
+            'runtime_actions' => array_values(array_unique($runtime_actions)),
+            'notes' => $notes,
+        );
+    }
+
+    private static function scan_has_issue(array $scan, $section, array $labels, array $statuses) {
+        if (empty($scan[$section]) || !is_array($scan[$section])) {
+            return false;
+        }
+
+        foreach ($scan[$section] as $check) {
+            $label = isset($check['label']) ? (string) $check['label'] : '';
+            $status = isset($check['status']) ? (string) $check['status'] : 'info';
+            if (in_array($label, $labels, true) && in_array($status, $statuses, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function llms_root_files_missing_or_empty() {
+        $files = array('llms.txt', 'llms-full.txt');
+        foreach ($files as $file) {
+            $path = trailingslashit(ABSPATH) . $file;
+            if (!is_readable($path)) {
+                return true;
+            }
+            $size = (int) @filesize($path);
+            if ($size <= 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function build_scan_trend(array $scan, array $previous_scan) {
@@ -4611,11 +4839,191 @@ final class GEO_LLMS_Auto_Regenerator {
             return;
         }
 
+        $settings = self::get_settings();
+        if (empty($settings['enable_llms_link_tag'])) {
+            return;
+        }
+
         if (!(is_front_page() || is_home())) {
             return;
         }
 
         printf("<link rel=\"llms\" href=\"%s\" />\n", esc_attr(self::get_llms_href_path()));
+    }
+
+    public static function filter_endpoint_canonical_redirect($redirect_url, $requested_url) {
+        if (!self::is_wp_endpoint_fix_enabled()) {
+            return $redirect_url;
+        }
+
+        $path = self::extract_request_path_from_url($requested_url);
+        if (!self::is_endpoint_fix_path($path)) {
+            return $redirect_url;
+        }
+
+        return false;
+    }
+
+    public static function maybe_serve_endpoint_fallbacks() {
+        if (!self::is_wp_endpoint_fix_enabled()) {
+            return;
+        }
+
+        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : 'GET';
+        if (!in_array($method, array('GET', 'HEAD'), true)) {
+            return;
+        }
+
+        $path = self::get_current_request_path();
+        if (!self::is_endpoint_fix_path($path)) {
+            return;
+        }
+
+        if ($path === '/robots.txt') {
+            self::serve_robots_endpoint();
+            return;
+        }
+
+        if ($path === '/wp-sitemap.xml') {
+            self::serve_wp_sitemap_endpoint();
+            return;
+        }
+
+        if ($path === '/sitemap.xml' || $path === '/sitemap_index.xml') {
+            self::serve_sitemap_alias_endpoint();
+            return;
+        }
+    }
+
+    private static function is_wp_endpoint_fix_enabled() {
+        if (is_admin() || (function_exists('wp_doing_ajax') && wp_doing_ajax())) {
+            return false;
+        }
+
+        $settings = self::get_settings();
+        return !empty($settings['enable_wp_endpoint_fix']);
+    }
+
+    private static function extract_request_path_from_url($url) {
+        if (!is_string($url) || $url === '') {
+            return '/';
+        }
+
+        $path = wp_parse_url($url, PHP_URL_PATH);
+        return self::normalize_path($path ? $path : '/');
+    }
+
+    private static function get_current_request_path() {
+        $request_uri = isset($_SERVER['REQUEST_URI']) ? (string) wp_unslash($_SERVER['REQUEST_URI']) : '/';
+        $path = wp_parse_url($request_uri, PHP_URL_PATH);
+        return self::normalize_path($path ? $path : '/');
+    }
+
+    private static function is_endpoint_fix_path($path) {
+        return in_array($path, array('/robots.txt', '/sitemap.xml', '/sitemap_index.xml', '/wp-sitemap.xml'), true);
+    }
+
+    private static function send_endpoint_response($body, $content_type) {
+        status_header(200);
+        nocache_headers();
+        header('Content-Type: ' . $content_type, true);
+        header('X-GEO-Endpoint-Fix: 1', true);
+
+        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : 'GET';
+        if ($method !== 'HEAD') {
+            echo (string) $body;
+        }
+        exit;
+    }
+
+    private static function serve_robots_endpoint() {
+        $path = trailingslashit(ABSPATH) . 'robots.txt';
+        if (is_readable($path)) {
+            $body = (string) file_get_contents($path);
+            self::send_endpoint_response($body, 'text/plain; charset=UTF-8');
+        }
+
+        $public = (bool) get_option('blog_public');
+        $body = "User-agent: *\n";
+        $body .= $public ? "Allow: /\n" : "Disallow: /\n";
+        $body .= 'Sitemap: ' . esc_url_raw(home_url('/sitemap.xml')) . "\n";
+        $body = apply_filters('robots_txt', $body, $public);
+        self::send_endpoint_response($body, 'text/plain; charset=UTF-8');
+    }
+
+    private static function serve_sitemap_alias_endpoint() {
+        $body = self::build_sitemap_index_xml(array(home_url('/wp-sitemap.xml')));
+        self::send_endpoint_response($body, 'application/xml; charset=UTF-8');
+    }
+
+    private static function serve_wp_sitemap_endpoint() {
+        if (function_exists('wp_sitemaps_get_server')) {
+            $server = wp_sitemaps_get_server();
+            if (is_object($server) && method_exists($server, 'render_sitemaps')) {
+                // WordPress core renderer may directly print and exit.
+                ob_start();
+                $server->render_sitemaps();
+                $rendered = trim((string) ob_get_clean());
+                if ($rendered !== '') {
+                    self::send_endpoint_response($rendered, 'application/xml; charset=UTF-8');
+                }
+            }
+        }
+
+        $body = self::build_wp_sitemap_fallback_xml();
+        self::send_endpoint_response($body, 'application/xml; charset=UTF-8');
+    }
+
+    private static function build_wp_sitemap_fallback_xml() {
+        $urls = array();
+        $urls[home_url('/')] = gmdate('c');
+
+        $posts = get_posts(
+            array(
+                'post_type' => 'any',
+                'post_status' => 'publish',
+                'posts_per_page' => 80,
+                'orderby' => 'modified',
+                'order' => 'DESC',
+                'fields' => 'ids',
+                'no_found_rows' => true,
+            )
+        );
+
+        foreach ($posts as $post_id) {
+            $permalink = get_permalink((int) $post_id);
+            if (!$permalink) {
+                continue;
+            }
+            $modified = get_post_modified_time('c', true, (int) $post_id);
+            $urls[$permalink] = $modified ? $modified : gmdate('c');
+        }
+
+        $lines = array();
+        $lines[] = '<?xml version="1.0" encoding="UTF-8"?>';
+        $lines[] = '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
+        foreach ($urls as $loc => $lastmod) {
+            $lines[] = '  <url>';
+            $lines[] = '    <loc>' . esc_html(esc_url_raw($loc)) . '</loc>';
+            $lines[] = '    <lastmod>' . esc_html($lastmod) . '</lastmod>';
+            $lines[] = '  </url>';
+        }
+        $lines[] = '</urlset>';
+
+        return implode("\n", $lines);
+    }
+
+    private static function build_sitemap_index_xml(array $urls) {
+        $lines = array();
+        $lines[] = '<?xml version="1.0" encoding="UTF-8"?>';
+        $lines[] = '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
+        foreach ($urls as $url) {
+            $lines[] = '  <sitemap>';
+            $lines[] = '    <loc>' . esc_html(esc_url_raw($url)) . '</loc>';
+            $lines[] = '  </sitemap>';
+        }
+        $lines[] = '</sitemapindex>';
+        return implode("\n", $lines);
     }
 
     private static function should_noindex_current_request() {

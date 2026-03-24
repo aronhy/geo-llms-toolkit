@@ -4,7 +4,7 @@ Tags: seo, llms, schema, sitemap, cloudflare
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.4.0
+Stable tag: 1.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -20,6 +20,7 @@ Main features:
 * Scan key endpoints: `robots.txt`, `sitemap.xml`, `sitemap_index.xml`, `wp-sitemap.xml`, `llms.txt`, `llms-full.txt`.
 * Scan key GEO/SEO signals: homepage H1, `link rel="llms"`, canonical, OG/Twitter, `og:image`, article schema, author page signals, breadcrumb schema, soft 404 behavior, `noindex` conflicts, and homepage/article fetch consistency.
 * Safe-fix workflow with preview, apply, rollback, and restore defaults.
+* Optional issue-driven auto-fix after scans: regenerate missing LLMS files, enforce homepage LLMS link output, enable low-value noindex, and enable WP-layer endpoint fallback for robots/sitemaps.
 * LLMS rule center with post type filters, taxonomy filters, manual pinning, exclusions, and per-post custom LLMS summary.
 * Scheduled scans with history, trend tracking, email/webhook alerts, and Markdown/JSON/CSV report export.
 * Optional cache integration for common WordPress page cache plugins and Cloudflare cache purge.
@@ -114,6 +115,14 @@ Service terms and privacy:
 
 == Changelog ==
 
+= 1.5.0 =
+
+* Added issue-driven auto-fix mode after scans (configurable).
+* Added automatic LLMS file regeneration when scan finds llms endpoints broken and root files are missing/empty.
+* Added configurable homepage LLMS link output switch and auto-fix hook.
+* Added WP-layer endpoint fallback fixer for `robots.txt`, `sitemap.xml`, `sitemap_index.xml`, `wp-sitemap.xml`.
+* Added scheduled/manual scan auto-fix toggles in settings.
+
 = 1.4.0 =
 
 * Added cache integration for Cloudflare and common WordPress page cache plugins.
@@ -143,6 +152,10 @@ Service terms and privacy:
 * Initial public release with automatic LLMS regeneration.
 
 == Upgrade Notice ==
+
+= 1.5.0 =
+
+Adds issue-driven auto-fix capability for LLMS/link/noindex/endpoint issues with configurable scan-time execution.
 
 = 1.4.0 =
 
