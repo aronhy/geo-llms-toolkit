@@ -37,6 +37,10 @@ This plugin is designed for site owners, operators, and developers who want a pr
 4. Review your LLMS rules, scan schedule, notifications, and optional cache settings.
 5. Run `Regenerate llms files` and `Run GEO scan` once to initialize baseline data.
 
+From this source repository, you can build an install ZIP with:
+
+`./scripts/build-wordpress-zip.sh`
+
 == Frequently Asked Questions ==
 
 = Does this plugin require an external service? =

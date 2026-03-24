@@ -63,6 +63,9 @@ php -l adapters/wordpress/geo-llms-auto-regenerator.php
 php -l adapters/wordpress/uninstall.php
 php -l adapters/wordpress/languages/index.php
 
+# build WordPress install ZIP
+./scripts/build-wordpress-zip.sh
+
 # standalone CLI help
 python3 standalone/geo_toolkit.py --help
 ```

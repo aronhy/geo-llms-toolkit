@@ -24,10 +24,14 @@
 
 ## 安装
 
-1. 将目录 `wp-plugin-geo-llms-auto` 上传到：
-   - `wp-content/plugins/geo-llms-auto-regenerator`
-2. 在 WP 后台启用插件：`GEO LLMS Auto Regenerator`
-3. 后台可手动触发：
+1. 在仓库根目录构建可安装 ZIP：
+   - `./scripts/build-wordpress-zip.sh`
+2. 构建产物在：
+   - `dist/geo-llms-auto-regenerator-<version>.zip`
+3. 在 WP 后台安装：
+   - `插件 -> 安装插件 -> 上传插件`
+   - 选择上面的 ZIP 并启用 `GEO LLMS Auto Regenerator`
+4. 后台可手动触发：
    - `设置 -> GEO LLMS Auto -> 立即重建 llms 文件`
 
 ## 触发条件
