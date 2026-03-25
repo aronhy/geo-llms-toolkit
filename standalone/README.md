@@ -41,10 +41,33 @@ chmod +x geo
 
 # 6) Build outreach plan from monitor result
 ./geo outreach \
+  plan \
   --monitor-report ./output/monitor.json \
   --pitch-url https://aronhouyu.com/your-best-page \
   --site-name "Aron Houyu" \
   --output-dir ./output/outreach
+
+# 7) Execute outreach campaign (only-new by default)
+./geo outreach run \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --provider dry-run
+
+# 8) Show campaign status
+./geo outreach status \
+  --campaign-file ./output/outreach/outreach-campaign.json
+
+# 9) Execute via webhook automation (n8n/Make/custom API)
+./geo outreach run \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --provider webhook \
+  --webhook-url https://your-automation-endpoint.example/webhook \
+  --webhook-token YOUR_TOKEN
+
+# 10) Execute via command adapter (e.g. wrapper around backlink-outreach-js)
+./geo outreach run \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --provider command \
+  --command-template 'node ./scripts/send.js --domain {domain} --keyword "{keyword}" --url {pitch_url}'
 ```
 
 ## Output files
@@ -55,6 +78,8 @@ chmod +x geo
 - `monitor.(md|json|csv)` when using `monitor --output`
 - `.geo-history/monitor-<domain>-<timestamp>.json` snapshot (default)
 - `outreach-plan.json`, `outreach-prospects.csv`, `outreach-report.md`, `outreach-sequences.md` when using `outreach`
+- `outreach-campaign.json` campaign state file for `outreach run/status`
+- `.geo-history/outreach-state.json` cross-run dedupe state (default)
 
 ## Monitor keywords file format
 
@@ -84,4 +109,7 @@ ai seo tools,expansion,1.0
 - Sitemap discovery checks `/sitemap.xml`, `/sitemap_index.xml`, `/wp-sitemap.xml`.
 - If sitemap discovery fails, llms generation falls back to homepage-only output.
 - `monitor` currently uses Bing SERP HTML as default provider.
-- `outreach` currently generates domain-level prospect lists and template email sequences; contact discovery/sending should be connected via your own outreach stack (n8n/CRM/backlink-outreach-js).
+- `outreach run` providers:
+- `dry-run`: update campaign status without sending.
+- `webhook`: POST each prospect payload to your automation endpoint.
+- `command`: execute your command template per prospect (for custom adapters).

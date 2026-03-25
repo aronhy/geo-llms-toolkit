@@ -72,3 +72,21 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 - Root and standalone README updated with monitor -> outreach workflow examples.
 - Standalone CLI description updated to include outreach planning.
+
+## [0.5.0] - 2026-03-25
+
+### Added
+
+- `geo outreach plan/run/status` workflow:
+- `plan`: generates outreach artifacts and persistent campaign file
+- `run`: executes campaign with provider options (`dry-run` / `webhook` / `command`)
+- `status`: renders campaign run status summary
+- Campaign state file: `outreach-campaign.json` with prospect-level status/attempt logs
+- Cross-run dedupe state: `.geo-history/outreach-state.json` for only-new strategy
+- Cooldown window control for repeat outreach suppression
+- Provider integration hooks for webhook and command execution
+
+### Changed
+
+- `geo outreach` now defaults to `plan` action for backward compatibility.
+- Standalone CLI version and default user-agent bumped to `0.5.0`.

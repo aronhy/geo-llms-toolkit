@@ -11,7 +11,9 @@ import argparse
 import csv
 import json
 import re
+import shlex
 import ssl
+import subprocess
 import sys
 import textwrap
 import xml.etree.ElementTree as ET
@@ -26,9 +28,9 @@ from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.4.0"
+TOOL_VERSION = "0.5.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.4 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.5 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -663,6 +665,279 @@ def build_outreach_plan(
     }
 
 
+def build_campaign_from_plan(plan: Dict[str, object]) -> Dict[str, object]:
+    campaign_id = datetime.now(timezone.utc).strftime("cmp-%Y%m%dT%H%M%S%fZ")
+    prospects = []
+    for p in plan.get("prospects", []):
+        if not isinstance(p, dict):
+            continue
+        item = dict(p)
+        item["status"] = "queued"
+        item["attempts"] = 0
+        item["last_attempt_at_utc"] = ""
+        item["sent_at_utc"] = ""
+        item["last_error"] = ""
+        prospects.append(item)
+
+    return {
+        "meta": {
+            "campaign_id": campaign_id,
+            "created_at_utc": now_utc(),
+            "last_run_at_utc": "",
+            "target_domain": plan.get("meta", {}).get("target_domain"),
+            "pitch_url": plan.get("meta", {}).get("pitch_url"),
+            "site_name": plan.get("meta", {}).get("site_name"),
+            "offer": plan.get("meta", {}).get("offer"),
+            "source_provider": plan.get("meta", {}).get("source_provider"),
+            "source_report_generated_at_utc": plan.get("meta", {}).get("source_report_generated_at_utc"),
+        },
+        "summary": {
+            "prospects_total": len(prospects),
+            "queued": len(prospects),
+            "sent": 0,
+            "failed": 0,
+            "skipped": 0,
+        },
+        "prospects": prospects,
+        "runs": [],
+    }
+
+
+def load_campaign(path: Path) -> Dict[str, object]:
+    if not path.exists():
+        raise ValueError(f"campaign file not found: {path}")
+    data = read_json_file(path)
+    if not isinstance(data.get("prospects"), list):
+        raise ValueError("invalid campaign file: prospects is missing")
+    if not isinstance(data.get("runs"), list):
+        data["runs"] = []
+    return data
+
+
+def refresh_campaign_summary(campaign: Dict[str, object]) -> None:
+    prospects = campaign.get("prospects", [])
+    queued = sent = failed = skipped = 0
+    for p in prospects:
+        if not isinstance(p, dict):
+            continue
+        status = str(p.get("status") or "queued")
+        if status == "sent":
+            sent += 1
+        elif status == "failed":
+            failed += 1
+        elif status == "skipped":
+            skipped += 1
+        else:
+            queued += 1
+    campaign["summary"] = {
+        "prospects_total": len([p for p in prospects if isinstance(p, dict)]),
+        "queued": queued,
+        "sent": sent,
+        "failed": failed,
+        "skipped": skipped,
+    }
+
+
+def update_state_sent(
+    state: Dict[str, object],
+    target_domain: str,
+    domain: str,
+    campaign_id: str,
+    pitch_url: str,
+) -> None:
+    records = state.setdefault("records", [])
+    if not isinstance(records, list):
+        state["records"] = []
+        records = state["records"]
+    now = now_utc()
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        if item.get("target_domain") == target_domain and item.get("domain") == domain:
+            item["last_sent_at_utc"] = now
+            item["campaign_id"] = campaign_id
+            item["pitch_url"] = pitch_url
+            return
+    records.append(
+        {
+            "target_domain": target_domain,
+            "domain": domain,
+            "last_sent_at_utc": now,
+            "campaign_id": campaign_id,
+            "pitch_url": pitch_url,
+        }
+    )
+
+
+def was_sent_recently(
+    state: Dict[str, object],
+    target_domain: str,
+    domain: str,
+    cooldown_days: int,
+) -> bool:
+    records = state.get("records", [])
+    if not isinstance(records, list):
+        return False
+    now = datetime.now(timezone.utc)
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        if item.get("target_domain") != target_domain or item.get("domain") != domain:
+            continue
+        sent_at = parse_utc(str(item.get("last_sent_at_utc") or ""))
+        if not sent_at:
+            continue
+        age_days = (now - sent_at).total_seconds() / 86400.0
+        if age_days < cooldown_days:
+            return True
+    return False
+
+
+def execute_webhook(
+    webhook_url: str,
+    webhook_token: str,
+    payload: Dict[str, object],
+    timeout: int,
+) -> Tuple[bool, str]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if webhook_token:
+        headers["Authorization"] = f"Bearer {webhook_token}"
+    req = Request(webhook_url, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=timeout, context=ssl.create_default_context()) as resp:
+            code = getattr(resp, "status", None) or resp.getcode()
+            raw = resp.read(4000).decode("utf-8", errors="replace")
+            ok = 200 <= int(code) < 300
+            return ok, f"HTTP {code}: {raw[:240]}"
+    except Exception as e:
+        return False, str(e)
+
+
+def execute_command(command_template: str, payload: Dict[str, object], timeout: int) -> Tuple[bool, str]:
+    values = {
+        "domain": str(payload.get("domain") or ""),
+        "keyword": str(payload.get("top_gap_keyword") or ""),
+        "pitch_url": str(payload.get("pitch_url") or ""),
+        "site_name": str(payload.get("site_name") or ""),
+        "email_subject": str(payload.get("email_subject") or ""),
+    }
+    command = command_template.format_map(values)
+    parts = shlex.split(command)
+    if not parts:
+        return False, "empty command"
+    try:
+        proc = subprocess.run(parts, capture_output=True, text=True, timeout=timeout, check=False)
+        out = (proc.stdout or proc.stderr or "").strip()
+        ok = proc.returncode == 0
+        return ok, out[:240]
+    except Exception as e:
+        return False, str(e)
+
+
+def run_outreach_campaign(
+    campaign: Dict[str, object],
+    provider: str,
+    only_new: bool,
+    cooldown_days: int,
+    state: Dict[str, object],
+    webhook_url: str,
+    webhook_token: str,
+    command_template: str,
+    timeout: int,
+) -> Dict[str, object]:
+    prospects = campaign.get("prospects", [])
+    if not isinstance(prospects, list):
+        raise ValueError("invalid campaign: prospects should be list")
+
+    target_domain = str(campaign.get("meta", {}).get("target_domain") or "")
+    pitch_url = str(campaign.get("meta", {}).get("pitch_url") or "")
+    site_name = str(campaign.get("meta", {}).get("site_name") or target_domain)
+    campaign_id = str(campaign.get("meta", {}).get("campaign_id") or "")
+    run_id = datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%S%fZ")
+    started_at = now_utc()
+
+    sent = failed = skipped = 0
+    for p in prospects:
+        if not isinstance(p, dict):
+            continue
+
+        domain = normalize_domain(str(p.get("domain") or ""))
+        if not domain:
+            continue
+
+        if only_new and was_sent_recently(state, target_domain, domain, cooldown_days):
+            skipped += 1
+            if str(p.get("status") or "") != "sent":
+                p["status"] = "skipped"
+                p["last_error"] = f"cooldown<{cooldown_days}d"
+            continue
+
+        payload = {
+            "campaign_id": campaign_id,
+            "target_domain": target_domain,
+            "pitch_url": pitch_url,
+            "site_name": site_name,
+            "domain": domain,
+            "top_gap_keyword": p.get("top_gap_keyword"),
+            "top_gap_group": p.get("top_gap_group"),
+            "email_subject": p.get("email_subject"),
+            "email_body": p.get("email_body"),
+            "keywords": p.get("keywords"),
+            "prospect_score": p.get("prospect_score"),
+            "opportunities": p.get("opportunities"),
+        }
+
+        ok = False
+        detail = ""
+        if provider == "dry-run":
+            ok = True
+            detail = "dry-run"
+        elif provider == "webhook":
+            if not webhook_url:
+                raise ValueError("webhook-url is required when provider=webhook")
+            ok, detail = execute_webhook(webhook_url, webhook_token, payload, timeout)
+        elif provider == "command":
+            if not command_template:
+                raise ValueError("command-template is required when provider=command")
+            ok, detail = execute_command(command_template, payload, timeout)
+        else:
+            raise ValueError(f"unsupported provider: {provider}")
+
+        p["attempts"] = int(p.get("attempts") or 0) + 1
+        p["last_attempt_at_utc"] = now_utc()
+        if ok:
+            p["status"] = "sent"
+            p["sent_at_utc"] = now_utc()
+            p["last_error"] = ""
+            sent += 1
+            update_state_sent(state, target_domain, domain, campaign_id, pitch_url)
+        else:
+            p["status"] = "failed"
+            p["last_error"] = detail
+            failed += 1
+
+    run = {
+        "run_id": run_id,
+        "provider": provider,
+        "started_at_utc": started_at,
+        "finished_at_utc": now_utc(),
+        "only_new": only_new,
+        "cooldown_days": cooldown_days,
+        "sent": sent,
+        "failed": failed,
+        "skipped": skipped,
+    }
+    runs = campaign.setdefault("runs", [])
+    if isinstance(runs, list):
+        runs.append(run)
+    campaign_meta = campaign.setdefault("meta", {})
+    if isinstance(campaign_meta, dict):
+        campaign_meta["last_run_at_utc"] = run["finished_at_utc"]
+    refresh_campaign_summary(campaign)
+    return run
+
+
 def parse_jsonld_blocks(blocks: Iterable[str]) -> List[Dict[str, object]]:
     items: List[Dict[str, object]] = []
     for raw in blocks:
@@ -801,6 +1076,35 @@ def pick_first_article_url(urls: List[str], base_url: str) -> Optional[str]:
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def parse_utc(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def read_json_file(path: Path) -> Dict[str, object]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"invalid JSON object: {path}")
+    return data
+
+
+def load_or_create_state(path: Path) -> Dict[str, object]:
+    if path.exists():
+        state = read_json_file(path)
+        records = state.get("records")
+        if isinstance(records, list):
+            return {"records": records}
+    return {"records": []}
+
+
+def save_state(path: Path, state: Dict[str, object]) -> None:
+    write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
 def endpoint_check(base_url: str, path: str, timeout: int, user_agent: str) -> Tuple[FetchResult, bool]:
@@ -1612,6 +1916,40 @@ def render_outreach_output(plan: Dict[str, object], output_format: str) -> str:
     return to_outreach_markdown(plan)
 
 
+def render_campaign_status_markdown(campaign: Dict[str, object]) -> str:
+    meta = campaign.get("meta", {})
+    summary = campaign.get("summary", {})
+    runs = campaign.get("runs", [])
+    lines = [
+        f"# Outreach Campaign Status - {meta.get('campaign_id', '-')}",
+        "",
+        f"- Target: {meta.get('target_domain', '-')}",
+        f"- Pitch URL: {meta.get('pitch_url', '-')}",
+        f"- Created (UTC): {meta.get('created_at_utc', '-')}",
+        f"- Last run (UTC): {meta.get('last_run_at_utc', '-') or '-'}",
+        f"- Prospects total: {summary.get('prospects_total', 0)}",
+        f"- Sent / Failed / Skipped / Queued: {summary.get('sent', 0)} / {summary.get('failed', 0)} / {summary.get('skipped', 0)} / {summary.get('queued', 0)}",
+        "",
+    ]
+    if isinstance(runs, list) and runs:
+        lines.extend(
+            [
+                "## Recent Runs",
+                "",
+                "| Run ID | Provider | Sent | Failed | Skipped | Finished (UTC) |",
+                "| --- | --- | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for run in list(runs)[-10:]:
+            if not isinstance(run, dict):
+                continue
+            lines.append(
+                f"| {run.get('run_id', '-')} | {run.get('provider', '-')} | {run.get('sent', 0)} | {run.get('failed', 0)} | "
+                f"{run.get('skipped', 0)} | {run.get('finished_at_utc', '-')} |"
+            )
+    return "\n".join(lines) + "\n"
+
+
 def choose_title(url: str, page: PageSignals) -> str:
     if page.title:
         return page.title.strip()
@@ -1759,52 +2097,112 @@ def handle_monitor(args: argparse.Namespace) -> int:
 
 
 def handle_outreach(args: argparse.Namespace) -> int:
-    monitor_path = Path(args.monitor_report).expanduser().resolve()
-    monitor_report = load_monitor_report(monitor_path)
-    target_domain = normalize_domain(str(monitor_report.get("meta", {}).get("target_domain") or ""))
-    site_name = args.site_name or target_domain
-
-    pitch_url = args.pitch_url.strip()
-    if not re.match(r"^https?://", pitch_url, flags=re.I):
-        raise ValueError("pitch-url must be a full URL (http/https)")
-
-    plan = build_outreach_plan(
-        monitor_report=monitor_report,
-        pitch_url=pitch_url,
-        site_name=site_name,
-        offer=args.offer,
-        max_prospects=args.max_prospects,
-        min_prospect_score=args.min_prospect_score,
-        min_opportunities=args.min_opportunities,
-        exclude_domains=args.exclude_domain or [],
-    )
-
+    action = (args.action or "plan").strip().lower()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    campaign_path = Path(args.campaign_file).expanduser().resolve()
+    state_path = Path(args.state_file).expanduser().resolve()
 
-    plan_json_path = output_dir / "outreach-plan.json"
-    prospects_csv_path = output_dir / "outreach-prospects.csv"
-    report_md_path = output_dir / "outreach-report.md"
-    sequences_md_path = output_dir / "outreach-sequences.md"
+    if action == "plan":
+        if not args.monitor_report:
+            raise ValueError("monitor-report is required for outreach plan")
+        if not args.pitch_url:
+            raise ValueError("pitch-url is required for outreach plan")
 
-    write_text(plan_json_path, render_outreach_output(plan, "json"))
-    write_text(prospects_csv_path, render_outreach_output(plan, "csv"))
-    write_text(report_md_path, render_outreach_output(plan, "markdown"))
-    write_text(sequences_md_path, to_outreach_sequences_markdown(plan))
+        monitor_path = Path(args.monitor_report).expanduser().resolve()
+        monitor_report = load_monitor_report(monitor_path)
+        target_domain = normalize_domain(str(monitor_report.get("meta", {}).get("target_domain") or ""))
+        site_name = args.site_name or target_domain
 
-    print(
-        textwrap.dedent(
-            f"""\
-            Outreach plan generated.
-            - Prospects: {plan['summary']['prospects_total']}
-            - JSON: {plan_json_path}
-            - CSV: {prospects_csv_path}
-            - Report: {report_md_path}
-            - Sequences: {sequences_md_path}
-            """
-        ).rstrip()
-    )
-    return 0
+        pitch_url = args.pitch_url.strip()
+        if not re.match(r"^https?://", pitch_url, flags=re.I):
+            raise ValueError("pitch-url must be a full URL (http/https)")
+
+        plan = build_outreach_plan(
+            monitor_report=monitor_report,
+            pitch_url=pitch_url,
+            site_name=site_name,
+            offer=args.offer,
+            max_prospects=args.max_prospects,
+            min_prospect_score=args.min_prospect_score,
+            min_opportunities=args.min_opportunities,
+            exclude_domains=args.exclude_domain or [],
+        )
+
+        plan_json_path = output_dir / "outreach-plan.json"
+        prospects_csv_path = output_dir / "outreach-prospects.csv"
+        report_md_path = output_dir / "outreach-report.md"
+        sequences_md_path = output_dir / "outreach-sequences.md"
+
+        write_text(plan_json_path, render_outreach_output(plan, "json"))
+        write_text(prospects_csv_path, render_outreach_output(plan, "csv"))
+        write_text(report_md_path, render_outreach_output(plan, "markdown"))
+        write_text(sequences_md_path, to_outreach_sequences_markdown(plan))
+
+        campaign = build_campaign_from_plan(plan)
+        write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
+
+        print(
+            textwrap.dedent(
+                f"""\
+                Outreach plan generated.
+                - Prospects: {plan['summary']['prospects_total']}
+                - JSON: {plan_json_path}
+                - CSV: {prospects_csv_path}
+                - Report: {report_md_path}
+                - Sequences: {sequences_md_path}
+                - Campaign: {campaign_path}
+                """
+            ).rstrip()
+        )
+        return 0
+
+    if action == "run":
+        campaign = load_campaign(campaign_path)
+        state = load_or_create_state(state_path)
+        run = run_outreach_campaign(
+            campaign=campaign,
+            provider=args.provider,
+            only_new=not bool(args.include_existing),
+            cooldown_days=args.cooldown_days,
+            state=state,
+            webhook_url=args.webhook_url or "",
+            webhook_token=args.webhook_token or "",
+            command_template=args.command_template or "",
+            timeout=args.timeout,
+        )
+        write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
+        save_state(state_path, state)
+        status_md_path = output_dir / "outreach-status.md"
+        write_text(status_md_path, render_campaign_status_markdown(campaign))
+        print(
+            textwrap.dedent(
+                f"""\
+                Outreach run completed.
+                - Campaign: {campaign_path}
+                - Provider: {run['provider']}
+                - Sent: {run['sent']}
+                - Failed: {run['failed']}
+                - Skipped: {run['skipped']}
+                - State: {state_path}
+                - Status report: {status_md_path}
+                """
+            ).rstrip()
+        )
+        return 0 if int(run["failed"]) == 0 else 3
+
+    if action == "status":
+        campaign = load_campaign(campaign_path)
+        body = render_campaign_status_markdown(campaign)
+        if args.output:
+            out_path = Path(args.output).expanduser().resolve()
+            write_text(out_path, body)
+            print(f"Campaign status saved: {out_path}")
+        else:
+            sys.stdout.write(body)
+        return 0
+
+    raise ValueError(f"unsupported outreach action: {action}")
 
 
 def handle_llms(args: argparse.Namespace) -> int:
@@ -1922,10 +2320,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     outreach_p = sub.add_parser(
         "outreach",
-        help="Generate outreach prospects and email sequences from monitor JSON report.",
+        help="Outreach workflow: plan / run / status.",
     )
-    outreach_p.add_argument("--monitor-report", required=True, help="Path to `geo monitor --format json` output.")
-    outreach_p.add_argument("--pitch-url", required=True, help="Your page URL to promote in outreach.")
+    outreach_p.add_argument(
+        "action",
+        nargs="?",
+        choices=["plan", "run", "status"],
+        default="plan",
+        help="Outreach action. Default: plan.",
+    )
+    outreach_p.add_argument("--monitor-report", help="Path to `geo monitor --format json` output.")
+    outreach_p.add_argument("--pitch-url", help="Your page URL to promote in outreach.")
     outreach_p.add_argument("--site-name", help="Sender/site name used in email templates.")
     outreach_p.add_argument("--offer", default="Resource inclusion request", help="Offer text in email template.")
     outreach_p.add_argument("--max-prospects", type=int, default=30, help="Max prospects to keep.")
@@ -1933,6 +2338,31 @@ def build_parser() -> argparse.ArgumentParser:
     outreach_p.add_argument("--min-opportunities", type=int, default=1, help="Min keyword opportunities per domain.")
     outreach_p.add_argument("--exclude-domain", action="append", help="Domain pattern to exclude (repeatable).")
     outreach_p.add_argument("--output-dir", default="./outreach-output", help="Output directory for generated files.")
+    outreach_p.add_argument(
+        "--campaign-file",
+        default="./outreach-output/outreach-campaign.json",
+        help="Campaign JSON path (written by plan, read by run/status).",
+    )
+    outreach_p.add_argument(
+        "--state-file",
+        default=".geo-history/outreach-state.json",
+        help="Global state file for dedupe/cooldown between runs.",
+    )
+    outreach_p.add_argument("--provider", choices=["dry-run", "webhook", "command"], default="dry-run")
+    outreach_p.add_argument("--webhook-url", help="Webhook endpoint when provider=webhook.")
+    outreach_p.add_argument("--webhook-token", help="Bearer token for webhook authentication.")
+    outreach_p.add_argument(
+        "--command-template",
+        help="Command template when provider=command. Supported vars: {domain} {keyword} {pitch_url} {site_name} {email_subject}",
+    )
+    outreach_p.add_argument(
+        "--include-existing",
+        action="store_true",
+        help="Also run prospects that were contacted within cooldown window (default is only new).",
+    )
+    outreach_p.add_argument("--cooldown-days", type=int, default=21, help="Skip domains contacted within this window.")
+    outreach_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    outreach_p.add_argument("--output", help="Write status markdown to file (used by `outreach status`).")
     outreach_p.set_defaults(func=handle_outreach)
 
     return parser
