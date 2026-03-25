@@ -17,6 +17,7 @@ import ssl
 import subprocess
 import sys
 import textwrap
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -42,9 +43,9 @@ from core.python.adapter_contract import (  # noqa: E402
 )
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.13.0"
+TOOL_VERSION = "0.15.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.13 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.15 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -85,6 +86,23 @@ DEFAULT_MONITOR_WEIGHTS = {
     "keyword_overlap": 0.45,
     "serp_coappear": 0.35,
     "rank_pressure": 0.20,
+}
+
+GENERIC_KEYWORD_TOKENS = {
+    "geo",
+    "llm",
+    "llms",
+    "seo",
+    "ai",
+    "aigc",
+    "search",
+    "engine",
+    "optimization",
+    "wordpress",
+    "shopify",
+    "marketing",
+    "traffic",
+    "content",
 }
 
 OUTREACH_STATUSES = {
@@ -845,11 +863,111 @@ def normalize_domain(value: str) -> str:
     return host
 
 
-def read_keywords_file(path: Path, brand_tokens: Sequence[str], max_keywords: int) -> List[KeywordItem]:
+def normalize_keyword_text(text: str) -> str:
+    if not text:
+        return ""
+    kw = unescape(text)
+    kw = kw.replace("\u3000", " ")
+    kw = re.sub(r"\s+", " ", kw).strip()
+    return kw
+
+
+def contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+
+def keyword_tokens(text: str) -> List[str]:
+    if not text:
+        return []
+    if contains_cjk(text):
+        tokens = re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", text.lower())
+    else:
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return [t for t in tokens if t]
+
+
+def classify_keyword_specificity(keyword: str, is_brand: bool) -> Tuple[bool, str]:
+    if is_brand:
+        return False, ""
+    kw = keyword.strip()
+    if not kw:
+        return True, "empty_keyword"
+
+    if contains_cjk(kw):
+        cjk_chunks = re.findall(r"[\u4e00-\u9fff]+", kw)
+        if len(cjk_chunks) == 1 and len(cjk_chunks[0]) <= 2:
+            return True, "too_short_cjk"
+        return False, ""
+
+    tokens = keyword_tokens(kw)
+    if not tokens:
+        return True, "no_valid_token"
+    if len(tokens) == 1:
+        return True, "single_token"
+    if len(tokens) <= 4 and all(t in GENERIC_KEYWORD_TOKENS for t in tokens):
+        return True, "all_generic_tokens"
+    return False, ""
+
+
+def read_keywords_file(
+    path: Path,
+    brand_tokens: Sequence[str],
+    max_keywords: int,
+    drop_low_specificity: bool = False,
+) -> Tuple[List[KeywordItem], Dict[str, int], List[Dict[str, str]]]:
     if not path.exists():
         raise ValueError(f"keywords file does not exist: {path}")
 
     rows: List[KeywordItem] = []
+    diagnostics: Dict[str, int] = {
+        "raw_total": 0,
+        "kept_total": 0,
+        "empty_or_comment_skipped": 0,
+        "duplicate_skipped": 0,
+        "normalized_changed": 0,
+        "invalid_value_fallback": 0,
+        "low_specificity_total": 0,
+        "low_specificity_dropped": 0,
+    }
+    low_specificity_samples: List[Dict[str, str]] = []
+    seen_keywords = set()
+
+    def append_keyword(raw_kw: str, group: str, value: float) -> None:
+        if len(rows) >= max_keywords:
+            return
+        diagnostics["raw_total"] += 1
+        kw = normalize_keyword_text(raw_kw)
+        if kw != raw_kw.strip():
+            diagnostics["normalized_changed"] += 1
+        if not kw:
+            diagnostics["empty_or_comment_skipped"] += 1
+            return
+        key = kw.lower()
+        if key in seen_keywords:
+            diagnostics["duplicate_skipped"] += 1
+            return
+
+        is_brand = is_brand_keyword(kw, brand_tokens)
+        low_specificity, reason = classify_keyword_specificity(kw, is_brand=is_brand)
+        if low_specificity:
+            diagnostics["low_specificity_total"] += 1
+            if len(low_specificity_samples) < 20:
+                low_specificity_samples.append({"keyword": kw, "reason": reason})
+            if drop_low_specificity:
+                diagnostics["low_specificity_dropped"] += 1
+                return
+
+        seen_keywords.add(key)
+        rows.append(
+            KeywordItem(
+                keyword=kw,
+                group=(group or "default").strip() or "default",
+                value=value,
+                is_brand=is_brand,
+            )
+        )
+        diagnostics["kept_total"] += 1
+
     suffix = path.suffix.lower()
     if suffix in {".csv", ".tsv"}:
         delimiter = "," if suffix == ".csv" else "\t"
@@ -862,45 +980,31 @@ def read_keywords_file(path: Path, brand_tokens: Sequence[str], max_keywords: in
             g_col = normalized_map.get("group")
             v_col = normalized_map.get("value")
             for row in reader:
-                kw = (row.get(k_col) or "").strip()
-                if not kw:
-                    continue
+                kw = (row.get(k_col) or "")
                 grp = (row.get(g_col) or "default").strip() if g_col else "default"
                 raw_value = (row.get(v_col) or "").strip() if v_col else ""
                 try:
                     value = float(raw_value) if raw_value else 1.0
                 except ValueError:
                     value = 1.0
-                rows.append(
-                    KeywordItem(
-                        keyword=kw,
-                        group=grp or "default",
-                        value=value,
-                        is_brand=is_brand_keyword(kw, brand_tokens),
-                    )
-                )
+                    diagnostics["invalid_value_fallback"] += 1
+                append_keyword(raw_kw=kw, group=grp, value=value)
                 if len(rows) >= max_keywords:
                     break
     else:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
-                kw = line.strip()
-                if not kw or kw.startswith("#"):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    diagnostics["empty_or_comment_skipped"] += 1
                     continue
-                rows.append(
-                    KeywordItem(
-                        keyword=kw,
-                        group="default",
-                        value=1.0,
-                        is_brand=is_brand_keyword(kw, brand_tokens),
-                    )
-                )
+                append_keyword(raw_kw=stripped, group="default", value=1.0)
                 if len(rows) >= max_keywords:
                     break
 
     if not rows:
         raise ValueError("no keywords loaded from file")
-    return rows
+    return rows, diagnostics, low_specificity_samples
 
 
 def is_brand_keyword(keyword: str, brand_tokens: Sequence[str]) -> bool:
@@ -908,13 +1012,13 @@ def is_brand_keyword(keyword: str, brand_tokens: Sequence[str]) -> bool:
     return any(token and token in kw for token in brand_tokens)
 
 
-def fetch_bing_results(keyword: str, depth: int, timeout: int, user_agent: str) -> List[str]:
+def fetch_bing_results_verbose(keyword: str, depth: int, timeout: int, user_agent: str) -> Tuple[List[str], str, int]:
     url = f"https://www.bing.com/search?q={quote_plus(keyword)}&count={max(10, min(depth, 50))}"
     res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=2_000_000)
     if res.status != 200:
-        return []
+        return [], (res.error or f"http_status:{res.status}"), res.status
     if "html" not in parse_content_type(res.headers):
-        return []
+        return [], f"non_html_content_type:{parse_content_type(res.headers) or 'unknown'}", res.status
     parser = BingResultParser(max_results=depth)
     parser.feed(res.body or "")
     parser.close()
@@ -927,7 +1031,115 @@ def fetch_bing_results(keyword: str, depth: int, timeout: int, user_agent: str) 
         cleaned.append(raw)
         if len(cleaned) >= depth:
             break
-    return cleaned
+    if not cleaned:
+        return [], "empty_serp_results", res.status
+    return cleaned, "", res.status
+
+
+def fetch_bing_results(keyword: str, depth: int, timeout: int, user_agent: str) -> List[str]:
+    urls, _error, _status = fetch_bing_results_verbose(keyword, depth, timeout, user_agent)
+    return urls
+
+
+def decode_duckduckgo_redirect(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    if parsed.netloc.lower().endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        qs = parse_qs(parsed.query)
+        candidate = qs.get("uddg", [""])[0]
+        if candidate:
+            return unquote(candidate)
+    return raw_url
+
+
+def fetch_duckduckgo_lite_results_verbose(keyword: str, depth: int, timeout: int, user_agent: str) -> Tuple[List[str], str, int]:
+    url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(keyword)}"
+    res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=2_000_000)
+    if res.status != 200:
+        return [], (res.error or f"http_status:{res.status}"), res.status
+    if "html" not in parse_content_type(res.headers):
+        return [], f"non_html_content_type:{parse_content_type(res.headers) or 'unknown'}", res.status
+
+    hrefs = re.findall(r"<a[^>]+href=[\"']([^\"']+)[\"']", res.body or "", flags=re.I)
+    cleaned: List[str] = []
+    for href in hrefs:
+        raw = decode_duckduckgo_redirect(unescape(href.strip()))
+        p = urlparse(raw)
+        host = p.netloc.lower()
+        if not host:
+            continue
+        if host.endswith("duckduckgo.com") or host.endswith("bing.com"):
+            continue
+        if p.scheme not in {"http", "https"}:
+            continue
+        if raw in cleaned:
+            continue
+        cleaned.append(raw)
+        if len(cleaned) >= depth:
+            break
+    if not cleaned:
+        return [], "empty_serp_results", res.status
+    return cleaned, "", res.status
+
+
+def fetch_serp_results(
+    keyword: str,
+    depth: int,
+    timeout: int,
+    user_agent: str,
+    provider: str,
+    retries: int,
+    backoff_ms: int,
+) -> Tuple[List[str], str, List[Dict[str, object]]]:
+    requested = (provider or "auto").strip().lower()
+    if requested in {"duckduckgo", "ddg"}:
+        requested = "duckduckgo-lite"
+
+    if requested == "auto":
+        provider_chain = ["bing", "duckduckgo-lite"]
+    else:
+        provider_chain = [requested]
+
+    fetchers = {
+        "bing": fetch_bing_results_verbose,
+        "duckduckgo-lite": fetch_duckduckgo_lite_results_verbose,
+    }
+    attempts: List[Dict[str, object]] = []
+    retry_count = max(0, min(int(retries), 5))
+    backoff = max(0, int(backoff_ms))
+
+    for provider_name in provider_chain:
+        fetcher = fetchers.get(provider_name)
+        if fetcher is None:
+            attempts.append(
+                {
+                    "provider": provider_name,
+                    "attempt": 1,
+                    "status_code": 0,
+                    "result_count": 0,
+                    "error": f"unsupported_provider:{provider_name}",
+                }
+            )
+            continue
+
+        max_attempts = retry_count + 1
+        for attempt in range(1, max_attempts + 1):
+            urls, error, status_code = fetcher(keyword, depth, timeout, user_agent)
+            attempts.append(
+                {
+                    "provider": provider_name,
+                    "attempt": attempt,
+                    "status_code": int(status_code),
+                    "result_count": len(urls),
+                    "error": error,
+                }
+            )
+            if urls:
+                return urls, provider_name, attempts
+            if attempt < max_attempts and backoff > 0:
+                time.sleep(backoff / 1000.0)
+
+    effective_provider = provider_chain[-1] if provider_chain else requested
+    return [], effective_provider, attempts
 
 
 def percentile(values: List[float], pct: float) -> float:
@@ -2660,15 +2872,24 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
 def run_monitor(
     base_url: str,
     keywords: List[KeywordItem],
+    keyword_load_stats: Optional[Dict[str, int]],
+    keyword_low_specificity_samples: Optional[List[Dict[str, str]]],
     competitors: List[str],
     timeout: int,
     user_agent: str,
     serp_depth: int,
+    serp_provider: str,
+    serp_retries: int,
+    serp_backoff_ms: int,
     auto_discover: bool,
     max_discovered: int,
     weights: Dict[str, float],
 ) -> Dict[str, object]:
     target_domain = normalize_domain(base_url)
+    requested_provider = (serp_provider or "auto").strip().lower()
+    if requested_provider in {"duckduckgo", "ddg"}:
+        requested_provider = "duckduckgo-lite"
+    provider_chain = ["bing", "duckduckgo-lite"] if requested_provider == "auto" else [requested_provider]
     provided_competitors: List[str] = []
     for raw in competitors:
         d = normalize_domain(raw)
@@ -2680,9 +2901,52 @@ def run_monitor(
     keyword_hits_target = 0
     keywords_with_serp_results = 0
     discovered_counter: Dict[str, int] = {}
+    provider_usage: Dict[str, int] = {}
+    serp_error_buckets: Dict[str, int] = {}
+    failed_keyword_samples: List[Dict[str, object]] = []
 
     for item in keywords:
-        urls = fetch_bing_results(item.keyword, serp_depth, timeout, user_agent)
+        urls, used_provider, fetch_attempts = fetch_serp_results(
+            keyword=item.keyword,
+            depth=serp_depth,
+            timeout=timeout,
+            user_agent=user_agent,
+            provider=requested_provider,
+            retries=serp_retries,
+            backoff_ms=serp_backoff_ms,
+        )
+        if used_provider:
+            provider_usage[used_provider] = provider_usage.get(used_provider, 0) + 1
+
+        serp_error = ""
+        if not urls:
+            for attempt in reversed(fetch_attempts):
+                candidate = str(attempt.get("error") or "").strip()
+                if candidate:
+                    serp_error = candidate
+                    break
+            if not serp_error:
+                serp_error = "empty_serp_results"
+            serp_error_buckets[serp_error] = serp_error_buckets.get(serp_error, 0) + 1
+            if len(failed_keyword_samples) < 12:
+                failed_keyword_samples.append(
+                    {
+                        "keyword": item.keyword,
+                        "provider": used_provider,
+                        "error": serp_error,
+                        "attempts": [
+                            {
+                                "provider": str(a.get("provider") or ""),
+                                "attempt": int(a.get("attempt") or 0),
+                                "status_code": int(a.get("status_code") or 0),
+                                "result_count": int(a.get("result_count") or 0),
+                                "error": str(a.get("error") or ""),
+                            }
+                            for a in fetch_attempts
+                        ],
+                    }
+                )
+
         domains: List[str] = []
         rank_by_domain: Dict[str, int] = {}
         for idx, u in enumerate(urls, start=1):
@@ -2712,6 +2976,8 @@ def run_monitor(
                 "domains": domains,
                 "rank_by_domain": rank_by_domain,
                 "serp_confidence": serp_confidence,
+                "serp_provider": used_provider,
+                "serp_error": serp_error,
             }
         )
 
@@ -2858,7 +3124,8 @@ def run_monitor(
             "generated_at_utc": now_utc(),
             "tool": "geo-llms-toolkit standalone-cli",
             "version": TOOL_VERSION,
-            "provider": "bing-serp",
+            "provider": f"{requested_provider}-serp",
+            "provider_chain": provider_chain,
             "serp_depth": serp_depth,
             "weights": {
                 "keyword_overlap": round(float(weights.get("keyword_overlap", DEFAULT_MONITOR_WEIGHTS["keyword_overlap"])), 4),
@@ -2875,6 +3142,20 @@ def run_monitor(
             "data_coverage_pct": round((keywords_with_serp_results / max(1, total_keywords)) * 100.0, 2),
             "competitors_tracked": len(competitor_profiles),
             "actions_generated": len(top_actions),
+            "serp_fail_keywords": total_keywords - keywords_with_serp_results,
+        },
+        "diagnostics": {
+            "requested_provider": requested_provider,
+            "provider_usage": provider_usage,
+            "retries": max(0, int(serp_retries)),
+            "backoff_ms": max(0, int(serp_backoff_ms)),
+            "keyword_load_stats": keyword_load_stats or {},
+            "keyword_low_specificity_samples": keyword_low_specificity_samples or [],
+            "error_buckets": {
+                key: count
+                for key, count in sorted(serp_error_buckets.items(), key=lambda kv: kv[1], reverse=True)
+            },
+            "failed_keyword_samples": failed_keyword_samples,
         },
         "competitors": competitor_profiles,
         "actions": top_actions,
@@ -2886,6 +3167,8 @@ def run_monitor(
                 "is_brand": r["is_brand"],
                 "target_rank": r["target_rank"],
                 "serp_confidence": r["serp_confidence"],
+                "serp_provider": r.get("serp_provider", ""),
+                "serp_error": r.get("serp_error", ""),
                 "top_domains": r["domains"][:10],
             }
             for r in rows
@@ -2933,24 +3216,55 @@ def to_monitor_markdown(report: Dict[str, object]) -> str:
     summary = report["summary"]
     competitors = report["competitors"]
     actions = report["actions"]
+    diagnostics = report.get("diagnostics", {}) if isinstance(report.get("diagnostics"), dict) else {}
+    provider_usage = diagnostics.get("provider_usage", {}) if isinstance(diagnostics.get("provider_usage"), dict) else {}
+    error_buckets = diagnostics.get("error_buckets", {}) if isinstance(diagnostics.get("error_buckets"), dict) else {}
+    keyword_load_stats = (
+        diagnostics.get("keyword_load_stats", {}) if isinstance(diagnostics.get("keyword_load_stats"), dict) else {}
+    )
+    low_specificity_samples = (
+        diagnostics.get("keyword_low_specificity_samples", [])
+        if isinstance(diagnostics.get("keyword_low_specificity_samples"), list)
+        else []
+    )
+    provider_chain = meta.get("provider_chain", [])
+    provider_chain_text = " -> ".join(str(x) for x in provider_chain) if provider_chain else "-"
 
     lines = [
         f"# GEO Competitor Monitor - {meta['target']}",
         "",
         f"- Generated (UTC): {meta['generated_at_utc']}",
         f"- Provider: {meta['provider']}",
+        f"- Provider chain: {provider_chain_text}",
         f"- Weights: overlap={meta.get('weights', {}).get('keyword_overlap', '-')}, coappear={meta.get('weights', {}).get('serp_coappear', '-')}, pressure={meta.get('weights', {}).get('rank_pressure', '-')}",
         f"- Keywords: {summary['keywords_total']} (brand={summary['keywords_brand']}, non-brand={summary['keywords_non_brand']})",
         f"- Keywords with SERP data: {summary['keywords_with_serp_results']}",
         f"- Data coverage: {summary.get('data_coverage_pct', 0)}%",
         f"- Competitors tracked: {summary['competitors_tracked']}",
         f"- Priority actions: {summary['actions_generated']}",
-        "",
-        "## Competitor Scores",
-        "",
-        "| Domain | Tier | Score | Confidence % | Keyword Overlap % | Co-appear % | Rank Pressure % | Non-Brand Share % | Avg Rank |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
+    if provider_usage:
+        usage_text = ", ".join(f"{k}:{v}" for k, v in provider_usage.items())
+        lines.append(f"- Provider usage: {usage_text}")
+    if diagnostics.get("retries") is not None:
+        lines.append(f"- Retries per provider: {diagnostics.get('retries')}")
+    if diagnostics.get("backoff_ms") is not None:
+        lines.append(f"- Retry backoff: {diagnostics.get('backoff_ms')}ms")
+    if keyword_load_stats:
+        lines.append(
+            f"- Keyword load: raw={keyword_load_stats.get('raw_total', 0)}, kept={keyword_load_stats.get('kept_total', 0)}, "
+            f"duplicate_skipped={keyword_load_stats.get('duplicate_skipped', 0)}, low_specificity={keyword_load_stats.get('low_specificity_total', 0)}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Competitor Scores",
+            "",
+            "| Domain | Tier | Score | Confidence % | Keyword Overlap % | Co-appear % | Rank Pressure % | Non-Brand Share % | Avg Rank |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
 
     for c in competitors:
         lines.append(
@@ -2959,12 +3273,29 @@ def to_monitor_markdown(report: Dict[str, object]) -> str:
         )
 
     if summary["keywords_with_serp_results"] == 0:
+        top_error = ""
+        if error_buckets:
+            top_error = str(next(iter(error_buckets.keys())))
         lines.extend(
             [
                 "",
-                "> Warning: no SERP data was captured. Check network, provider accessibility, or try a different region/proxy.",
+                "> Warning: no SERP data was captured. Check DNS/network/provider access and retry with fallback provider.",
             ]
         )
+        if top_error:
+            lines.append(f"> Top error: `{top_error}`")
+    elif error_buckets:
+        lines.extend(
+            [
+                "",
+                f"> Note: partial SERP fetch failures detected ({sum(int(v) for v in error_buckets.values())} keywords).",
+            ]
+        )
+    if low_specificity_samples:
+        lines.append("")
+        lines.append("> Keyword quality warning: low-specificity keywords detected; consider replacing with intent-based long-tail terms.")
+        for sample in low_specificity_samples[:6]:
+            lines.append(f"> - {sample.get('keyword', '')} ({sample.get('reason', '')})")
 
     lines.extend(["", "## Priority Actions", "", "| Priority | Keyword | Group | Target Rank | Best Competitor | Gap Action |",
                   "| --- | --- | --- | ---: | --- | --- |"])
@@ -4350,14 +4681,24 @@ def handle_monitor(args: argparse.Namespace) -> int:
     keywords_path = Path(args.keywords_file).expanduser().resolve()
     weights_file = Path(args.weights_file).expanduser().resolve() if args.weights_file else None
     weights = load_monitor_weights(weights_file)
-    keywords = read_keywords_file(keywords_path, brand_tokens=brand_tokens, max_keywords=args.max_keywords)
+    keywords, keyword_load_stats, keyword_low_specificity_samples = read_keywords_file(
+        keywords_path,
+        brand_tokens=brand_tokens,
+        max_keywords=args.max_keywords,
+        drop_low_specificity=args.drop_low_specificity_keywords,
+    )
     report = run_monitor(
         base_url=base_url,
         keywords=keywords,
+        keyword_load_stats=keyword_load_stats,
+        keyword_low_specificity_samples=keyword_low_specificity_samples,
         competitors=args.competitor or [],
         timeout=args.timeout,
         user_agent=args.user_agent,
         serp_depth=args.serp_depth,
+        serp_provider=args.serp_provider,
+        serp_retries=args.serp_retries,
+        serp_backoff_ms=args.serp_backoff_ms,
         auto_discover=args.discover_competitors,
         max_discovered=args.max_discovered,
         weights=weights,
@@ -4757,7 +5098,20 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_p.add_argument("--max-discovered", type=int, default=8, help="Max discovered competitors to include.")
     monitor_p.add_argument("--brand-token", action="append", help="Extra brand token(s) for brand keyword isolation.")
     monitor_p.add_argument("--serp-depth", type=int, default=10, help="SERP depth per keyword (max 50).")
+    monitor_p.add_argument(
+        "--serp-provider",
+        choices=["auto", "bing", "duckduckgo-lite"],
+        default="auto",
+        help="SERP provider strategy. auto tries bing then duckduckgo-lite.",
+    )
+    monitor_p.add_argument("--serp-retries", type=int, default=1, help="Retry count per provider when SERP fetch fails.")
+    monitor_p.add_argument("--serp-backoff-ms", type=int, default=350, help="Backoff milliseconds between retries.")
     monitor_p.add_argument("--max-keywords", type=int, default=100, help="Max keywords loaded from file.")
+    monitor_p.add_argument(
+        "--drop-low-specificity-keywords",
+        action="store_true",
+        help="Drop low-specificity generic keywords (single-token/all-generic) during keyword loading.",
+    )
     monitor_p.add_argument("--weights-file", help="JSON weights file: keyword_overlap/serp_coappear/rank_pressure.")
     monitor_p.add_argument("--history-dir", default=".geo-history", help="Directory to store JSON snapshots.")
     monitor_p.add_argument("--format", choices=["markdown", "json", "csv"], default="markdown")

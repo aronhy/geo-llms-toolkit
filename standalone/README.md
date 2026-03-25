@@ -32,6 +32,10 @@ chmod +x geo
 ./geo monitor aronhouyu.com \
   --keywords-file ./examples/keywords.txt \
   --discover-competitors \
+  --serp-provider auto \
+  --serp-retries 2 \
+  --serp-backoff-ms 500 \
+  --drop-low-specificity-keywords \
   --output ./output/monitor.json \
   --format json
 
@@ -59,6 +63,10 @@ chmod +x geo
 - `geo llms`: 生成 `llms.txt` / `llms-full.txt`
 - `geo adapter-check`: 验证内置适配器是否满足 Phase3 adapter contract
 - `geo monitor`: 关键词维度竞品监控 + 优先级动作建议
+  - 支持 `--serp-provider auto|bing|duckduckgo-lite`（默认 `auto`）
+  - 支持 `--serp-retries` 与 `--serp-backoff-ms`，并在 JSON 里输出抓取失败诊断
+  - 支持关键词清洗诊断：去重、规范化、低质量词识别（`diagnostics.keyword_load_stats`）
+  - 可选 `--drop-low-specificity-keywords` 自动过滤过泛词
 - `geo outreach plan/run/status/verify/update`: 外联计划、执行、状态跟踪、回访
 - `geo index discover/track/submit/audit/report`: 收录发现、跟踪、提交、诊断、周报
 

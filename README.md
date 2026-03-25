@@ -7,7 +7,7 @@
 
 ## 当前版本
 
-- Standalone CLI: `0.13.0`
+- Standalone CLI: `0.15.0`
 - WordPress Plugin (`GEO LLMS Auto Regenerator`): `1.9.0`
 
 `1.9.0` 已补齐 WordPress 对 CLI 关键参数的对齐项（brand-token / exclude-domain / enrich-contacts / apify-allow-fallback-first）。
@@ -44,6 +44,10 @@ chmod +x geo
 ./geo llms aronhouyu.com --output-dir ./output
 ./geo adapter-check aronhouyu.com --format markdown
 ./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --discover-competitors --output ./output/monitor.json --format json
+# 网络受限时可切换或回退 SERP provider
+./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --serp-provider auto --serp-retries 2 --serp-backoff-ms 500
+# 自动过滤过泛关键词（可选）
+./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --drop-low-specificity-keywords
 ./geo outreach plan --monitor-report ./output/monitor.json --pitch-url https://aronhouyu.com --output-dir ./output
 ./geo index discover aronhouyu.com --output ./output/index-discover.json --format json
 ./geo index track aronhouyu.com --discover-report ./output/index-discover.json --output ./output/index-track.json --format json
@@ -57,6 +61,18 @@ CLI 命令组：
 - `monitor`, `monitor-diff`
 - `outreach (plan/run/status/verify/update)`
 - `index (discover/track/submit/audit/report)`
+
+`monitor` 关键参数补充：
+
+- `--serp-provider auto|bing|duckduckgo-lite`（默认 `auto`，先 Bing 后 DuckDuckGo Lite）
+- `--serp-retries`（默认 `1`）
+- `--serp-backoff-ms`（默认 `350`）
+- `--drop-low-specificity-keywords`（自动过滤 single-token / all-generic 过泛词）
+
+`monitor` 结果里的 `diagnostics` 新增：
+
+- `keyword_load_stats`（raw/kept/duplicate_skipped/low_specificity 等）
+- `keyword_low_specificity_samples`（示例关键词 + 原因）
 
 ## WordPress 插件快速开始
 

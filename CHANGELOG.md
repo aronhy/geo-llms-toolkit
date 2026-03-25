@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
 
+## [0.15.0] - 2026-03-25
+
+### Added
+
+- `geo monitor` keyword quality pipeline:
+- keyword normalization (whitespace/unescape)
+- keyword de-duplication (case-insensitive)
+- low-specificity keyword diagnostics (`single_token` / `all_generic_tokens`)
+- JSON diagnostics output:
+- `diagnostics.keyword_load_stats`
+- `diagnostics.keyword_low_specificity_samples`
+- New `geo monitor` option:
+- `--drop-low-specificity-keywords` to auto-filter generic keywords before SERP run.
+
+### Changed
+
+- `geo monitor` markdown output now includes keyword-load stats and quality warnings.
+- Standalone CLI runtime version bumped to `0.15.0`.
+
 ## [0.14.0] - 2026-03-25
 
 ### Added
