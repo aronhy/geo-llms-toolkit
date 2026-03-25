@@ -107,6 +107,12 @@ CLI 命令组：
 - 迁移计划：[docs/migration-plan.md](./docs/migration-plan.md)
 - 适配器合同：[core/docs/adapter-contract.md](./core/docs/adapter-contract.md)
 
+## Known Limitations
+
+- 当前扫描默认检查固定 sitemap 端点（`/sitemap.xml`、`/sitemap_index.xml`、`/wp-sitemap.xml`）。对使用自定义 sitemap 路径的网站（如 `robots.txt` 声明 `/shared/sitemap.xml.gz`）可能出现误报。
+- `llms.txt` / `llms-full.txt` 采用强校验（非 `200` 视为失败）。对未部署 LLMS 文件的网站会产生 `FAIL`。
+- 非 WordPress 站点在 `wp-sitemap.xml` 上通常天然不存在，当前会按失败记录。
+
 ## 开发命令
 
 ```bash
