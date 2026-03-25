@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import shlex
 import ssl
@@ -24,13 +25,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.9.0"
+TOOL_VERSION = "0.10.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.9 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.10 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -82,6 +83,52 @@ OUTREACH_STATUSES = {
     "replied",
     "won",
     "lost",
+}
+
+INDEX_STATUSES = {"indexed", "not_indexed", "unknown"}
+INDEX_GROUPS = {"core", "blog", "low_value", "other"}
+
+INDEX_AUDIT_ISSUES = {
+    "crawl_failed": {
+        "priority": "P0",
+        "message": "URL 抓取失败（5xx/网络错误）。",
+        "fix": "先修可用性与稳定性（源站、WAF、CDN 回源），确保 URL 对搜索引擎 200 可访问。",
+    },
+    "not_found": {
+        "priority": "P0",
+        "message": "URL 返回 404/410。",
+        "fix": "确认页面是否应存在；应存在则恢复 200 内容，不应存在则从收录池移除。",
+    },
+    "noindex": {
+        "priority": "P0",
+        "message": "检测到 noindex（meta 或 x-robots-tag）。",
+        "fix": "移除 noindex 或仅对低价值页保留 noindex。",
+    },
+    "canonical_conflict": {
+        "priority": "P1",
+        "message": "canonical 指向了不同 URL。",
+        "fix": "将 canonical 改为页面自身规范 URL，避免跨模板错误指向。",
+    },
+    "soft_404": {
+        "priority": "P1",
+        "message": "疑似软 404（内容空薄或 404 语义）。",
+        "fix": "补全主体内容与唯一价值，避免“未找到/404”语义文案。",
+    },
+    "thin_content": {
+        "priority": "P2",
+        "message": "页面内容过薄。",
+        "fix": "补充核心段落、FAQ、示例，提升正文与信息密度。",
+    },
+    "weak_internal_links": {
+        "priority": "P2",
+        "message": "内链信号偏弱（首页未发现该 URL）。",
+        "fix": "从首页/目录页/相关文章添加可抓取文本链接。",
+    },
+    "missing_in_llms": {
+        "priority": "P2",
+        "message": "该 URL 未出现在 llms 池。",
+        "fix": "重建 llms，并确保高价值页被纳入。",
+    },
 }
 
 
@@ -370,6 +417,278 @@ def parse_html_signals(html: str) -> PageSignals:
     parser.close()
     return parser
 
+
+def normalize_url_for_compare(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parsed.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path[:-1]
+    query = parsed.query.strip()
+    if query:
+        return f"{parsed.scheme.lower()}://{host}{path}?{query}"
+    return f"{parsed.scheme.lower()}://{host}{path}"
+
+
+def clean_found_url(value: str) -> str:
+    return value.strip().strip(".,;:()[]{}<>\"'")
+
+
+def extract_urls_from_text(text: str, host: str) -> List[str]:
+    if not text:
+        return []
+    found = re.findall(r"https?://[^\s<>\"]+", text, flags=re.I)
+    urls: List[str] = []
+    for raw in found:
+        url = clean_found_url(raw)
+        parsed = urlparse(url)
+        h = parsed.netloc.lower()
+        if h.startswith("www."):
+            h = h[4:]
+        if h != host:
+            continue
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def extract_links_from_html(html: str, base_url: str, host: str, limit: int = 300) -> List[str]:
+    if not html:
+        return []
+    links = re.findall(r"""<a[^>]+href=["']([^"'#]+)["']""", html, flags=re.I)
+    urls: List[str] = []
+    for raw in links:
+        abs_url = urljoin(base_url + "/", raw.strip())
+        parsed = urlparse(abs_url)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        h = parsed.netloc.lower()
+        if h.startswith("www."):
+            h = h[4:]
+        if h != host:
+            continue
+        if abs_url not in urls:
+            urls.append(abs_url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def classify_index_group(url: str, base_url: str, extra_low_patterns: Optional[List[str]] = None) -> str:
+    if is_low_value_url(url, extra_patterns=extra_low_patterns or []):
+        return "low_value"
+
+    normalized_base = normalize_url_for_compare(base_url + "/")
+    normalized_url = normalize_url_for_compare(url)
+    if normalized_url == normalized_base:
+        return "core"
+
+    path = safe_path(url).lower()
+    if re.search(r"/(blog|posts?|article|articles|news|insights)/", path):
+        return "blog"
+    if re.search(r"/20\d{2}/\d{1,2}/", path):
+        return "blog"
+
+    depth = len([p for p in path.split("/") if p])
+    if depth <= 1:
+        return "core"
+    if depth >= 2:
+        return "blog"
+    return "other"
+
+
+def parse_url_column_file(path: Path) -> List[str]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        values: List[str] = []
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, str):
+                    values.append(item.strip())
+                elif isinstance(item, dict) and item.get("url"):
+                    values.append(str(item["url"]).strip())
+        elif isinstance(data, dict):
+            for key in ("urls", "records", "items"):
+                arr = data.get(key)
+                if not isinstance(arr, list):
+                    continue
+                for item in arr:
+                    if isinstance(item, str):
+                        values.append(item.strip())
+                    elif isinstance(item, dict) and item.get("url"):
+                        values.append(str(item["url"]).strip())
+                if values:
+                    break
+        return [v for v in values if v]
+
+    if suffix in {".csv", ".tsv"}:
+        delimiter = "," if suffix == ".csv" else "\t"
+        rows: List[str] = []
+        with path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
+            if not reader.fieldnames:
+                return rows
+            normalized = {name.lower(): name for name in reader.fieldnames}
+            col = normalized.get("url") or normalized.get("loc")
+            if not col:
+                return rows
+            for row in reader:
+                val = (row.get(col) or "").strip()
+                if val:
+                    rows.append(val)
+        return rows
+
+    values: List[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            values.append(raw)
+    return values
+
+
+def discover_index_url_pool(
+    base_url: str,
+    timeout: int,
+    user_agent: str,
+    max_urls: int,
+    extra_low_patterns: Optional[List[str]] = None,
+) -> Dict[str, object]:
+    base_host = normalize_domain(base_url)
+    source_map: Dict[str, List[str]] = {
+        "sitemap": [],
+        "llms": [],
+        "homepage_links": [],
+    }
+
+    sitemap_urls = collect_urls_from_sitemaps(
+        base_url,
+        timeout=timeout,
+        user_agent=user_agent,
+        max_urls=max(max_urls * 3, 300),
+    )
+    source_map["sitemap"] = sitemap_urls[:]
+
+    for llms_path in ["/llms.txt", "/llms-full.txt"]:
+        res = fetch_url(base_url + llms_path, timeout=timeout, user_agent=user_agent, max_bytes=1_500_000)
+        if res.status == 200 and "text/" in parse_content_type(res.headers):
+            urls = extract_urls_from_text(res.body, base_host)
+            for u in urls:
+                if u not in source_map["llms"]:
+                    source_map["llms"].append(u)
+
+    home = fetch_url(base_url + "/", timeout=timeout, user_agent=user_agent, max_bytes=1_500_000)
+    if home.status == 200 and "html" in parse_content_type(home.headers):
+        source_map["homepage_links"] = extract_links_from_html(home.body, base_url, base_host, limit=max_urls * 3)
+
+    union = {}
+    homepage_url = f"{base_url}/"
+    for src, urls in source_map.items():
+        for u in urls:
+            normalized = normalize_url_for_compare(u)
+            if not normalized:
+                continue
+            if normalized not in union:
+                union[normalized] = {"url": u, "sources": set()}
+            union[normalized]["sources"].add(src)
+
+    normalized_homepage = normalize_url_for_compare(homepage_url)
+    if normalized_homepage not in union:
+        union[normalized_homepage] = {"url": homepage_url, "sources": {"seed"}}
+
+    urls: List[Dict[str, object]] = []
+    for info in union.values():
+        url = str(info["url"])
+        group = classify_index_group(url, base_url, extra_low_patterns=extra_low_patterns or [])
+        urls.append(
+            {
+                "url": url,
+                "group": group,
+                "sources": sorted(list(info["sources"])),
+            }
+        )
+    urls.sort(key=lambda x: (str(x["group"]), str(x["url"])))
+    if len(urls) > max_urls:
+        urls = urls[:max_urls]
+
+    group_counts: Dict[str, int] = {g: 0 for g in sorted(INDEX_GROUPS)}
+    for item in urls:
+        group_counts[str(item["group"])] = group_counts.get(str(item["group"]), 0) + 1
+
+    return {
+        "meta": {
+            "target": base_url,
+            "target_domain": base_host,
+            "generated_at_utc": now_utc(),
+            "tool": "geo-llms-toolkit standalone-cli",
+            "version": TOOL_VERSION,
+        },
+        "summary": {
+            "urls_total": len(urls),
+            "source_counts": {k: len(v) for k, v in source_map.items()},
+            "groups": group_counts,
+        },
+        "urls": urls,
+    }
+
+
+def load_index_pool_from_file(path: Path, base_url: str, extra_low_patterns: Optional[List[str]] = None) -> List[Dict[str, object]]:
+    raw_urls = parse_url_column_file(path)
+    base_host = normalize_domain(base_url)
+    seen = set()
+    pool: List[Dict[str, object]] = []
+    for raw in raw_urls:
+        url = raw.strip()
+        if not re.match(r"^https?://", url, flags=re.I):
+            url = urljoin(base_url + "/", url.lstrip("/"))
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != base_host:
+            continue
+        normalized = normalize_url_for_compare(url)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        pool.append(
+            {
+                "url": url,
+                "group": classify_index_group(url, base_url, extra_low_patterns=extra_low_patterns or []),
+                "sources": ["input"],
+            }
+        )
+    return pool
+
+
+def list_index_track_snapshots(history_dir: Path, domain: str) -> List[Path]:
+    if not history_dir.exists():
+        return []
+    files = sorted(history_dir.glob(f"index-track-{domain}-*.json"))
+    return [f for f in files if f.is_file()]
+
+
+def load_track_records(path: Path) -> Dict[str, Dict[str, object]]:
+    data = read_json_file(path)
+    records = data.get("records", [])
+    out: Dict[str, Dict[str, object]] = {}
+    if not isinstance(records, list):
+        return out
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        u = str(item.get("url") or "")
+        key = normalize_url_for_compare(u)
+        if not key:
+            continue
+        out[key] = item
+    return out
 
 def normalize_domain(value: str) -> str:
     parsed = urlparse(value if "://" in value else f"https://{value}")
@@ -1519,6 +1838,322 @@ def save_state(path: Path, state: Dict[str, object]) -> None:
     write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
+def probe_index_status(
+    url: str,
+    timeout: int,
+    user_agent: str,
+    search_depth: int,
+    strict_search: bool,
+) -> Dict[str, object]:
+    checked_at = now_utc()
+    res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=1_500_000)
+    ctype = parse_content_type(res.headers)
+    x_robots = (res.headers.get("x-robots-tag") or "").lower()
+
+    status = "unknown"
+    reason = "unclassified"
+    indexable = False
+    canonical = ""
+    meta_robots: List[str] = []
+    search_hit = False
+    search_results = 0
+
+    if res.status in {404, 410}:
+        status = "not_indexed"
+        reason = f"http_{res.status}"
+    elif res.status == 0:
+        status = "unknown"
+        reason = "fetch_error"
+    elif res.status >= 500:
+        status = "unknown"
+        reason = f"http_{res.status}"
+    elif res.status >= 300 and res.status < 400:
+        status = "unknown"
+        reason = f"http_{res.status}"
+    elif res.status == 200:
+        if "html" in ctype:
+            page = parse_html_signals(res.body)
+            canonical = page.canonical
+            meta_robots = page.meta_robots[:]
+            robots_blob = ",".join(page.meta_robots).lower()
+            if "noindex" in robots_blob or "noindex" in x_robots:
+                status = "not_indexed"
+                reason = "noindex"
+            else:
+                indexable = True
+        else:
+            if "noindex" in x_robots:
+                status = "not_indexed"
+                reason = "noindex"
+            else:
+                indexable = True
+
+        if indexable:
+            query = f"\"{url}\""
+            serp_urls = fetch_bing_results(query, max(5, min(search_depth, 20)), timeout, user_agent)
+            search_results = len(serp_urls)
+            target_norm = normalize_url_for_compare(url)
+            for u in serp_urls:
+                if normalize_url_for_compare(u) == target_norm:
+                    search_hit = True
+                    break
+            if search_hit:
+                status = "indexed"
+                reason = "search_exact_match"
+            else:
+                if search_results == 0:
+                    status = "unknown"
+                    reason = "search_empty"
+                else:
+                    status = "not_indexed" if strict_search else "unknown"
+                    reason = "search_no_match"
+
+    return {
+        "url": url,
+        "status": status if status in INDEX_STATUSES else "unknown",
+        "reason": reason,
+        "checked_at_utc": checked_at,
+        "http_status": res.status,
+        "content_type": ctype,
+        "indexable": bool(indexable),
+        "canonical": canonical,
+        "meta_robots": meta_robots,
+        "x_robots_tag": x_robots,
+        "search_hit": bool(search_hit),
+        "search_results": search_results,
+        "error": res.error or "",
+    }
+
+
+def merge_index_track_records(
+    current_records: List[Dict[str, object]],
+    previous_records: Dict[str, Dict[str, object]],
+) -> List[Dict[str, object]]:
+    merged: List[Dict[str, object]] = []
+    for item in current_records:
+        url = str(item.get("url") or "")
+        key = normalize_url_for_compare(url)
+        prev = previous_records.get(key, {}) if key else {}
+        checked_at = str(item.get("checked_at_utc") or now_utc())
+        current_status = str(item.get("status") or "unknown")
+        prev_status = str(prev.get("status") or "")
+
+        item["first_seen_utc"] = str(prev.get("first_seen_utc") or checked_at)
+
+        prev_first_indexed = str(prev.get("first_indexed_utc") or "")
+        if current_status == "indexed":
+            item["first_indexed_utc"] = prev_first_indexed or checked_at
+        else:
+            item["first_indexed_utc"] = prev_first_indexed
+
+        prev_first_not_indexed = str(prev.get("first_not_indexed_utc") or "")
+        if current_status == "not_indexed":
+            item["first_not_indexed_utc"] = prev_first_not_indexed or checked_at
+        else:
+            item["first_not_indexed_utc"] = prev_first_not_indexed
+
+        if prev_status and prev_status != current_status:
+            item["last_status_change_utc"] = checked_at
+        else:
+            item["last_status_change_utc"] = str(prev.get("last_status_change_utc") or checked_at)
+
+        if item.get("first_not_indexed_utc") and current_status == "not_indexed":
+            dt = parse_utc(str(item["first_not_indexed_utc"]))
+            if dt:
+                age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+                item["not_indexed_age_days"] = round(age_days, 2)
+            else:
+                item["not_indexed_age_days"] = 0.0
+        else:
+            item["not_indexed_age_days"] = 0.0
+
+        merged.append(item)
+
+    merged.sort(key=lambda x: str(x.get("url") or ""))
+    return merged
+
+
+def compute_index_track_changes(
+    records: List[Dict[str, object]],
+    previous_records: Dict[str, Dict[str, object]],
+    long_unindexed_days: int,
+) -> Dict[str, List[Dict[str, object]]]:
+    newly_indexed: List[Dict[str, object]] = []
+    dropped_indexed: List[Dict[str, object]] = []
+    status_changed: List[Dict[str, object]] = []
+    long_unindexed: List[Dict[str, object]] = []
+
+    for item in records:
+        url = str(item.get("url") or "")
+        key = normalize_url_for_compare(url)
+        prev = previous_records.get(key, {}) if key else {}
+        prev_status = str(prev.get("status") or "")
+        cur_status = str(item.get("status") or "unknown")
+
+        if prev_status and prev_status != cur_status:
+            status_changed.append(
+                {
+                    "url": url,
+                    "from": prev_status,
+                    "to": cur_status,
+                }
+            )
+        if cur_status == "indexed" and prev_status in {"not_indexed", "unknown"}:
+            newly_indexed.append(
+                {
+                    "url": url,
+                    "from": prev_status,
+                    "to": "indexed",
+                }
+            )
+        if prev_status == "indexed" and cur_status in {"not_indexed", "unknown"}:
+            dropped_indexed.append(
+                {
+                    "url": url,
+                    "from": "indexed",
+                    "to": cur_status,
+                }
+            )
+
+        if cur_status == "not_indexed":
+            age_days = float(item.get("not_indexed_age_days") or 0.0)
+            if age_days >= float(max(1, long_unindexed_days)):
+                long_unindexed.append(
+                    {
+                        "url": url,
+                        "group": item.get("group", "other"),
+                        "age_days": age_days,
+                        "reason": item.get("reason", ""),
+                    }
+                )
+
+    newly_indexed.sort(key=lambda x: str(x["url"]))
+    dropped_indexed.sort(key=lambda x: str(x["url"]))
+    status_changed.sort(key=lambda x: str(x["url"]))
+    long_unindexed.sort(key=lambda x: float(x.get("age_days", 0.0)), reverse=True)
+
+    return {
+        "newly_indexed": newly_indexed,
+        "dropped_indexed": dropped_indexed,
+        "status_changed": status_changed,
+        "long_unindexed": long_unindexed,
+    }
+
+
+def summarize_index_track_records(records: List[Dict[str, object]]) -> Dict[str, object]:
+    by_status = {"indexed": 0, "not_indexed": 0, "unknown": 0}
+    by_group: Dict[str, Dict[str, int]] = {g: {"total": 0, "indexed": 0} for g in sorted(INDEX_GROUPS)}
+    for row in records:
+        status = str(row.get("status") or "unknown")
+        group = str(row.get("group") or "other")
+        by_status[status if status in by_status else "unknown"] += 1
+        if group not in by_group:
+            by_group[group] = {"total": 0, "indexed": 0}
+        by_group[group]["total"] += 1
+        if status == "indexed":
+            by_group[group]["indexed"] += 1
+
+    total = len(records)
+    indexed = by_status["indexed"]
+    index_rate = round((indexed / max(1, total)) * 100.0, 2)
+    return {
+        "total": total,
+        "indexed": indexed,
+        "not_indexed": by_status["not_indexed"],
+        "unknown": by_status["unknown"],
+        "index_rate_pct": index_rate,
+        "groups": by_group,
+    }
+
+
+def normalize_status_filter(raw: str) -> List[str]:
+    values = [s.strip().lower() for s in raw.split(",") if s.strip()]
+    out = [s for s in values if s in INDEX_STATUSES]
+    return out or ["not_indexed", "unknown"]
+
+
+def load_index_pool_from_discover_report(
+    path: Path,
+    base_url: str,
+    extra_low_patterns: Optional[List[str]] = None,
+) -> List[Dict[str, object]]:
+    data = read_json_file(path)
+    items = data.get("urls", [])
+    if not isinstance(items, list):
+        return []
+    pool: List[Dict[str, object]] = []
+    seen = set()
+    for item in items:
+        if isinstance(item, str):
+            url = item
+            group = classify_index_group(url, base_url, extra_low_patterns=extra_low_patterns or [])
+            sources = ["discover"]
+        elif isinstance(item, dict):
+            url = str(item.get("url") or "")
+            group = str(item.get("group") or classify_index_group(url, base_url, extra_low_patterns=extra_low_patterns or []))
+            sources = item.get("sources") if isinstance(item.get("sources"), list) else ["discover"]
+        else:
+            continue
+        key = normalize_url_for_compare(url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        pool.append({"url": url, "group": group, "sources": sources})
+    return pool
+
+
+def load_index_pool_from_track_report(path: Path, statuses: Sequence[str]) -> List[Dict[str, object]]:
+    data = read_json_file(path)
+    records = data.get("records", [])
+    pool: List[Dict[str, object]] = []
+    seen = set()
+    status_set = {s for s in statuses if s in INDEX_STATUSES}
+    for row in records if isinstance(records, list) else []:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").lower()
+        if status_set and status not in status_set:
+            continue
+        url = str(row.get("url") or "")
+        key = normalize_url_for_compare(url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        pool.append(
+            {
+                "url": url,
+                "group": str(row.get("group") or "other"),
+                "sources": ["track-report"],
+            }
+        )
+    return pool
+
+
+def resolve_index_pool(
+    base_url: str,
+    timeout: int,
+    user_agent: str,
+    max_urls: int,
+    extra_low_patterns: Optional[List[str]],
+    urls_file: str,
+    discover_report_file: str,
+) -> List[Dict[str, object]]:
+    if urls_file:
+        path = Path(urls_file).expanduser().resolve()
+        return load_index_pool_from_file(path, base_url, extra_low_patterns=extra_low_patterns or [])[:max_urls]
+    if discover_report_file:
+        path = Path(discover_report_file).expanduser().resolve()
+        return load_index_pool_from_discover_report(path, base_url, extra_low_patterns=extra_low_patterns or [])[:max_urls]
+    auto = discover_index_url_pool(
+        base_url=base_url,
+        timeout=timeout,
+        user_agent=user_agent,
+        max_urls=max_urls,
+        extra_low_patterns=extra_low_patterns or [],
+    )
+    return list(auto.get("urls", []))[:max_urls]
+
+
 def endpoint_check(base_url: str, path: str, timeout: int, user_agent: str) -> Tuple[FetchResult, bool]:
     url = f"{base_url}{path}"
     res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=120_000)
@@ -2656,6 +3291,895 @@ def build_llms_files(
     }
 
 
+def render_index_discover_output(report: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        from io import StringIO
+
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["url", "group", "sources"])
+        for row in report.get("urls", []):
+            writer.writerow([row.get("url", ""), row.get("group", ""), ";".join(row.get("sources", []))])
+        return buf.getvalue()
+
+    summary = report.get("summary", {})
+    lines = [
+        f"# GEO Index Discover - {report.get('meta', {}).get('target', '-')}",
+        "",
+        f"- Generated (UTC): {report.get('meta', {}).get('generated_at_utc', '-')}",
+        f"- URL pool total: {summary.get('urls_total', 0)}",
+        f"- Source counts: {json.dumps(summary.get('source_counts', {}), ensure_ascii=False)}",
+        f"- Group counts: {json.dumps(summary.get('groups', {}), ensure_ascii=False)}",
+        "",
+        "## URL Pool",
+        "",
+        "| URL | Group | Sources |",
+        "| --- | --- | --- |",
+    ]
+    for row in report.get("urls", []):
+        lines.append(f"| {row.get('url', '')} | {row.get('group', '')} | {', '.join(row.get('sources', []))} |")
+    return "\n".join(lines) + "\n"
+
+
+def render_index_track_output(report: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        from io import StringIO
+
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(
+            [
+                "url",
+                "group",
+                "status",
+                "reason",
+                "http_status",
+                "indexable",
+                "search_hit",
+                "not_indexed_age_days",
+                "first_seen_utc",
+                "first_indexed_utc",
+                "first_not_indexed_utc",
+                "last_status_change_utc",
+            ]
+        )
+        for row in report.get("records", []):
+            writer.writerow(
+                [
+                    row.get("url", ""),
+                    row.get("group", ""),
+                    row.get("status", ""),
+                    row.get("reason", ""),
+                    row.get("http_status", ""),
+                    row.get("indexable", False),
+                    row.get("search_hit", False),
+                    row.get("not_indexed_age_days", 0),
+                    row.get("first_seen_utc", ""),
+                    row.get("first_indexed_utc", ""),
+                    row.get("first_not_indexed_utc", ""),
+                    row.get("last_status_change_utc", ""),
+                ]
+            )
+        return buf.getvalue()
+
+    summary = report.get("summary", {})
+    changes = report.get("changes", {})
+    lines = [
+        f"# GEO Index Track - {report.get('meta', {}).get('target', '-')}",
+        "",
+        f"- Generated (UTC): {report.get('meta', {}).get('generated_at_utc', '-')}",
+        f"- Index rate: {summary.get('index_rate_pct', 0)}%",
+        f"- Indexed / Not indexed / Unknown: {summary.get('indexed', 0)} / {summary.get('not_indexed', 0)} / {summary.get('unknown', 0)}",
+        f"- Newly indexed: {len(changes.get('newly_indexed', []))}",
+        f"- Dropped indexed: {len(changes.get('dropped_indexed', []))}",
+        f"- Long unindexed: {len(changes.get('long_unindexed', []))}",
+        "",
+        "## Priority Lists",
+        "",
+        f"- 新增收录: {', '.join([r.get('url', '') for r in changes.get('newly_indexed', [])[:8]]) or '-'}",
+        f"- 掉索引: {', '.join([r.get('url', '') for r in changes.get('dropped_indexed', [])[:8]]) or '-'}",
+        f"- 长期未收录: {', '.join([r.get('url', '') for r in changes.get('long_unindexed', [])[:8]]) or '-'}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_index_submit_output(report: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        from io import StringIO
+
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["url", "group", "status", "provider", "detail"])
+        for row in report.get("items", []):
+            writer.writerow([row.get("url", ""), row.get("group", ""), row.get("status", ""), row.get("provider", ""), row.get("detail", "")])
+        return buf.getvalue()
+
+    summary = report.get("summary", {})
+    lines = [
+        f"# GEO Index Submit - {report.get('meta', {}).get('target', '-')}",
+        "",
+        f"- Generated (UTC): {report.get('meta', {}).get('generated_at_utc', '-')}",
+        f"- Provider: {report.get('meta', {}).get('provider', '-')}",
+        f"- Total: {summary.get('total', 0)}",
+        f"- Submitted: {summary.get('submitted', 0)}",
+        f"- Skipped: {summary.get('skipped', 0)}",
+        f"- Failed: {summary.get('failed', 0)}",
+        "",
+        "## Result",
+        "",
+        "| URL | Group | Status | Detail |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in report.get("items", []):
+        detail = str(row.get("detail", "")).replace("|", "\\|")
+        lines.append(f"| {row.get('url', '')} | {row.get('group', '')} | {row.get('status', '')} | {detail} |")
+    return "\n".join(lines) + "\n"
+
+
+def render_index_audit_output(report: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        from io import StringIO
+
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["url", "group", "status", "max_priority", "issues", "fixes"])
+        for row in report.get("records", []):
+            issue_codes = ";".join([str(x.get("code", "")) for x in row.get("issues", []) if isinstance(x, dict)])
+            fixes = ";".join([str(x.get("fix", "")) for x in row.get("issues", []) if isinstance(x, dict)])
+            writer.writerow([row.get("url", ""), row.get("group", ""), row.get("status", ""), row.get("max_priority", ""), issue_codes, fixes])
+        return buf.getvalue()
+
+    summary = report.get("summary", {})
+    lines = [
+        f"# GEO Index Audit - {report.get('meta', {}).get('target', '-')}",
+        "",
+        f"- Generated (UTC): {report.get('meta', {}).get('generated_at_utc', '-')}",
+        f"- URL total: {summary.get('total', 0)}",
+        f"- PASS/WARN/FAIL: {summary.get('pass', 0)}/{summary.get('warn', 0)}/{summary.get('fail', 0)}",
+        f"- P0/P1/P2: {summary.get('p0', 0)}/{summary.get('p1', 0)}/{summary.get('p2', 0)}",
+        "",
+        "## Top Fixes",
+        "",
+        "| Issue | Priority | Count | Fix |",
+        "| --- | --- | ---: | --- |",
+    ]
+    for item in report.get("issues_summary", [])[:12]:
+        fix = str(item.get("fix", "")).replace("|", "\\|")
+        lines.append(f"| {item.get('code', '')} | {item.get('priority', '')} | {item.get('count', 0)} | {fix} |")
+    lines.extend(["", "## Problem URLs", "", "| URL | Group | Status | Max Priority | Issues |", "| --- | --- | --- | --- | --- |"])
+    for row in report.get("records", []):
+        if row.get("status") == "pass":
+            continue
+        issue_codes = ", ".join([str(x.get("code", "")) for x in row.get("issues", []) if isinstance(x, dict)])
+        lines.append(
+            f"| {row.get('url', '')} | {row.get('group', '')} | {row.get('status', '')} | {row.get('max_priority', '')} | {issue_codes} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_index_report_output(report: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        from io import StringIO
+
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["generated_at_utc", "index_rate_pct", "indexed", "total", "newly_indexed", "dropped_indexed"])
+        for row in report.get("trend", []):
+            writer.writerow(
+                [
+                    row.get("generated_at_utc", ""),
+                    row.get("index_rate_pct", 0),
+                    row.get("indexed", 0),
+                    row.get("total", 0),
+                    row.get("newly_indexed", 0),
+                    row.get("dropped_indexed", 0),
+                ]
+            )
+        return buf.getvalue()
+
+    summary = report.get("summary", {})
+    lines = [
+        f"# GEO Index Weekly Report - {report.get('meta', {}).get('target', '-')}",
+        "",
+        f"- Window: {report.get('meta', {}).get('window_days', 0)} days",
+        f"- Snapshots: {report.get('meta', {}).get('snapshots', 0)}",
+        f"- Current index rate: {summary.get('current_index_rate_pct', 0)}%",
+        f"- Avg indexing latency: {summary.get('avg_indexing_days', 0)} days",
+        f"- Deindex rate: {summary.get('deindex_rate_pct', 0)}%",
+        f"- Recovery rate: {summary.get('recovery_rate_pct', 0)}%",
+        "",
+        "## Template Performance",
+        "",
+        "| Group | Indexed | Total | Index Rate % |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for row in report.get("template_performance", []):
+        lines.append(
+            f"| {row.get('group', '')} | {row.get('indexed', 0)} | {row.get('total', 0)} | {row.get('index_rate_pct', 0)} |"
+        )
+    lines.extend(["", "## Trend", "", "| Time (UTC) | Index Rate % | Indexed | Total | New | Dropped |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: |"])
+    for row in report.get("trend", []):
+        lines.append(
+            f"| {row.get('generated_at_utc', '')} | {row.get('index_rate_pct', 0)} | {row.get('indexed', 0)} | {row.get('total', 0)} | {row.get('newly_indexed', 0)} | {row.get('dropped_indexed', 0)} |"
+        )
+    focus = report.get("focus_lists", {})
+    lines.extend(
+        [
+            "",
+            "## Focus Lists",
+            "",
+            f"- 新增收录: {', '.join([x.get('url', '') for x in focus.get('newly_indexed', [])[:8]]) or '-'}",
+            f"- 掉索引: {', '.join([x.get('url', '') for x in focus.get('dropped_indexed', [])[:8]]) or '-'}",
+            f"- 长期未收录: {', '.join([x.get('url', '') for x in focus.get('long_unindexed', [])[:8]]) or '-'}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def execute_index_submit_command(command_template: str, payload: Dict[str, object], timeout: int) -> Tuple[bool, str]:
+    raw_values = {
+        "url": str(payload.get("url") or ""),
+        "type": str(payload.get("type") or ""),
+        "target_domain": str(payload.get("target_domain") or ""),
+        "provider": str(payload.get("provider") or ""),
+    }
+    values = dict(raw_values)
+    for key, value in raw_values.items():
+        values[f"{key}_q"] = shlex.quote(value)
+    try:
+        command = command_template.format_map(values)
+    except KeyError as e:
+        return False, f"missing template variable: {e}"
+    parts = shlex.split(command)
+    if not parts:
+        return False, "empty command"
+    try:
+        proc = subprocess.run(parts, capture_output=True, text=True, timeout=timeout, check=False)
+        out = (proc.stdout or proc.stderr or "").strip()
+        return proc.returncode == 0, out[:240]
+    except Exception as e:
+        return False, str(e)
+
+
+def is_google_indexing_supported_url(url: str) -> bool:
+    path = safe_path(url).lower()
+    return bool(re.search(r"/(job|jobs|career|careers|hiring|live|stream|broadcast|event|events)/", path))
+
+
+def submit_to_google_indexing_api(
+    url: str,
+    token: str,
+    timeout: int,
+    notification_type: str = "URL_UPDATED",
+) -> Tuple[bool, str]:
+    if not token:
+        return False, "missing_google_token"
+    body = json.dumps({"url": url, "type": notification_type}, ensure_ascii=False).encode("utf-8")
+    req = Request(
+        "https://indexing.googleapis.com/v3/urlNotifications:publish",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=timeout, context=ssl.create_default_context()) as resp:
+            code = getattr(resp, "status", None) or resp.getcode()
+            raw = resp.read(1200).decode("utf-8", errors="replace")
+            return (200 <= int(code) < 300), f"HTTP {code}: {raw[:220]}"
+    except Exception as e:
+        return False, str(e)
+
+
+def extract_visible_text_length(html: str) -> int:
+    if not html:
+        return 0
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return len(text)
+
+
+def audit_index_url(
+    url: str,
+    group: str,
+    timeout: int,
+    user_agent: str,
+    thin_threshold_chars: int,
+    homepage_body: str,
+    llms_url_set: set,
+) -> Dict[str, object]:
+    issues: List[Dict[str, object]] = []
+    res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=1_500_000)
+    ctype = parse_content_type(res.headers)
+    x_robots = (res.headers.get("x-robots-tag") or "").lower()
+
+    page = PageSignals()
+    if res.status == 200 and "html" in ctype:
+        page = parse_html_signals(res.body)
+
+    if res.status == 0 or res.status >= 500:
+        cfg = INDEX_AUDIT_ISSUES["crawl_failed"]
+        issues.append({"code": "crawl_failed", "priority": cfg["priority"], "message": cfg["message"], "fix": cfg["fix"]})
+    elif res.status in {404, 410}:
+        cfg = INDEX_AUDIT_ISSUES["not_found"]
+        issues.append({"code": "not_found", "priority": cfg["priority"], "message": cfg["message"], "fix": cfg["fix"]})
+    else:
+        robots_blob = ",".join(page.meta_robots).lower() if page.meta_robots else ""
+        if "noindex" in x_robots or "noindex" in robots_blob:
+            cfg = INDEX_AUDIT_ISSUES["noindex"]
+            issues.append({"code": "noindex", "priority": cfg["priority"], "message": cfg["message"], "fix": cfg["fix"]})
+
+        canonical = normalize_url_for_compare(page.canonical) if page.canonical else ""
+        self_url = normalize_url_for_compare(url)
+        if canonical and self_url and canonical != self_url:
+            cfg = INDEX_AUDIT_ISSUES["canonical_conflict"]
+            issues.append(
+                {
+                    "code": "canonical_conflict",
+                    "priority": cfg["priority"],
+                    "message": cfg["message"],
+                    "fix": cfg["fix"],
+                    "canonical": page.canonical,
+                }
+            )
+
+        title_lower = (page.title or "").lower()
+        body_lower = (res.body[:12000] or "").lower()
+        if "404" in title_lower or "not found" in body_lower[:3000] or "页面不存在" in body_lower[:3000]:
+            cfg = INDEX_AUDIT_ISSUES["soft_404"]
+            issues.append({"code": "soft_404", "priority": cfg["priority"], "message": cfg["message"], "fix": cfg["fix"]})
+
+        text_len = extract_visible_text_length(res.body)
+        if group in {"blog", "core"} and text_len < max(120, thin_threshold_chars):
+            cfg = INDEX_AUDIT_ISSUES["thin_content"]
+            issues.append(
+                {
+                    "code": "thin_content",
+                    "priority": cfg["priority"],
+                    "message": cfg["message"],
+                    "fix": cfg["fix"],
+                    "chars": text_len,
+                }
+            )
+
+        if group in {"blog", "core"}:
+            key = normalize_url_for_compare(url)
+            if key and key not in llms_url_set:
+                cfg = INDEX_AUDIT_ISSUES["missing_in_llms"]
+                issues.append({"code": "missing_in_llms", "priority": cfg["priority"], "message": cfg["message"], "fix": cfg["fix"]})
+            if homepage_body and url.lower() not in homepage_body:
+                cfg = INDEX_AUDIT_ISSUES["weak_internal_links"]
+                issues.append({"code": "weak_internal_links", "priority": cfg["priority"], "message": cfg["message"], "fix": cfg["fix"]})
+
+    max_priority = "PASS"
+    if any(i.get("priority") == "P0" for i in issues):
+        max_priority = "P0"
+    elif any(i.get("priority") == "P1" for i in issues):
+        max_priority = "P1"
+    elif any(i.get("priority") == "P2" for i in issues):
+        max_priority = "P2"
+
+    status = "pass"
+    if max_priority == "P0":
+        status = "fail"
+    elif max_priority in {"P1", "P2"}:
+        status = "warn"
+
+    return {
+        "url": url,
+        "group": group,
+        "status": status,
+        "max_priority": max_priority,
+        "http_status": res.status,
+        "content_type": ctype,
+        "issues": issues,
+    }
+
+
+def build_index_report_from_history(base_url: str, history_dir: Path, days: int) -> Dict[str, object]:
+    domain = normalize_domain(base_url)
+    snapshots = list_index_track_snapshots(history_dir, domain)
+    if not snapshots:
+        raise ValueError(f"no index track snapshots found under {history_dir}")
+
+    now = datetime.now(timezone.utc)
+    min_time = now.timestamp() - (max(1, days) * 86400)
+    selected: List[Dict[str, object]] = []
+    for p in snapshots:
+        data = read_json_file(p)
+        ts = parse_utc(str(data.get("meta", {}).get("generated_at_utc") or ""))
+        if not ts:
+            continue
+        if ts.timestamp() >= min_time:
+            selected.append(data)
+
+    if not selected:
+        raise ValueError(f"no snapshots in last {days} days")
+
+    selected.sort(key=lambda x: str(x.get("meta", {}).get("generated_at_utc") or ""))
+    latest = selected[-1]
+    latest_records = latest.get("records", []) if isinstance(latest.get("records"), list) else []
+
+    trend: List[Dict[str, object]] = []
+    deindex_events = 0
+    indexed_exposure = 0
+    for idx, snap in enumerate(selected):
+        summary = snap.get("summary", {}) if isinstance(snap.get("summary"), dict) else {}
+        changes = snap.get("changes", {}) if isinstance(snap.get("changes"), dict) else {}
+        trend.append(
+            {
+                "generated_at_utc": snap.get("meta", {}).get("generated_at_utc", ""),
+                "index_rate_pct": summary.get("index_rate_pct", 0),
+                "indexed": summary.get("indexed", 0),
+                "total": summary.get("total", 0),
+                "newly_indexed": len(changes.get("newly_indexed", [])) if isinstance(changes.get("newly_indexed"), list) else 0,
+                "dropped_indexed": len(changes.get("dropped_indexed", [])) if isinstance(changes.get("dropped_indexed"), list) else 0,
+            }
+        )
+
+        if idx == 0:
+            continue
+        prev = selected[idx - 1]
+        prev_records = prev.get("records", []) if isinstance(prev.get("records"), list) else []
+        cur_records = snap.get("records", []) if isinstance(snap.get("records"), list) else []
+        prev_indexed = {normalize_url_for_compare(str(r.get("url") or "")) for r in prev_records if isinstance(r, dict) and str(r.get("status")) == "indexed"}
+        cur_indexed = {normalize_url_for_compare(str(r.get("url") or "")) for r in cur_records if isinstance(r, dict) and str(r.get("status")) == "indexed"}
+        prev_indexed = {u for u in prev_indexed if u}
+        cur_indexed = {u for u in cur_indexed if u}
+        indexed_exposure += len(prev_indexed)
+        deindex_events += len(prev_indexed - cur_indexed)
+
+    latency_days: List[float] = []
+    recovered = 0
+    recovery_base = 0
+    group_stats: Dict[str, Dict[str, int]] = {}
+    long_unindexed: List[Dict[str, object]] = []
+    for row in latest_records:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "unknown")
+        group = str(row.get("group") or "other")
+        g = group_stats.setdefault(group, {"indexed": 0, "total": 0})
+        g["total"] += 1
+        if status == "indexed":
+            g["indexed"] += 1
+
+        first_seen = parse_utc(str(row.get("first_seen_utc") or ""))
+        first_indexed = parse_utc(str(row.get("first_indexed_utc") or ""))
+        if first_seen and first_indexed and first_indexed >= first_seen:
+            latency_days.append((first_indexed - first_seen).total_seconds() / 86400.0)
+
+        first_not_idx = parse_utc(str(row.get("first_not_indexed_utc") or ""))
+        if first_not_idx:
+            recovery_base += 1
+            if status == "indexed":
+                recovered += 1
+            age_days = (now - first_not_idx).total_seconds() / 86400.0
+            if status == "not_indexed" and age_days >= 14:
+                long_unindexed.append(
+                    {
+                        "url": row.get("url", ""),
+                        "group": group,
+                        "age_days": round(age_days, 2),
+                    }
+                )
+
+    template_performance = []
+    for group, g in sorted(group_stats.items(), key=lambda x: x[0]):
+        total = g["total"]
+        indexed = g["indexed"]
+        template_performance.append(
+            {
+                "group": group,
+                "indexed": indexed,
+                "total": total,
+                "index_rate_pct": round((indexed / max(1, total)) * 100.0, 2),
+            }
+        )
+
+    latest_changes = latest.get("changes", {}) if isinstance(latest.get("changes"), dict) else {}
+    long_unindexed.sort(key=lambda x: float(x.get("age_days", 0.0)), reverse=True)
+    avg_indexing_days = round(sum(latency_days) / len(latency_days), 2) if latency_days else 0.0
+    deindex_rate_pct = round((deindex_events / max(1, indexed_exposure)) * 100.0, 2)
+    recovery_rate_pct = round((recovered / max(1, recovery_base)) * 100.0, 2)
+
+    return {
+        "meta": {
+            "target": base_url,
+            "target_domain": domain,
+            "generated_at_utc": now_utc(),
+            "window_days": max(1, days),
+            "snapshots": len(selected),
+        },
+        "summary": {
+            "current_index_rate_pct": float(latest.get("summary", {}).get("index_rate_pct", 0)),
+            "avg_indexing_days": avg_indexing_days,
+            "deindex_rate_pct": deindex_rate_pct,
+            "recovery_rate_pct": recovery_rate_pct,
+        },
+        "template_performance": template_performance,
+        "trend": trend,
+        "focus_lists": {
+            "newly_indexed": latest_changes.get("newly_indexed", []) if isinstance(latest_changes.get("newly_indexed"), list) else [],
+            "dropped_indexed": latest_changes.get("dropped_indexed", []) if isinstance(latest_changes.get("dropped_indexed"), list) else [],
+            "long_unindexed": long_unindexed[:30],
+        },
+    }
+
+
+def handle_index(args: argparse.Namespace) -> int:
+    base_url = normalize_base_url(args.target)
+    action = str(args.index_action or "discover")
+    history_dir = Path(args.history_dir).expanduser().resolve()
+    history_dir.mkdir(parents=True, exist_ok=True)
+    extra_low_patterns = args.low_value_pattern or []
+
+    if action == "discover":
+        report = discover_index_url_pool(
+            base_url=base_url,
+            timeout=args.timeout,
+            user_agent=args.user_agent,
+            max_urls=args.max_urls,
+            extra_low_patterns=extra_low_patterns,
+        )
+        body = render_index_discover_output(report, args.format)
+        if args.output:
+            out = Path(args.output).expanduser().resolve()
+            write_text(out, body)
+            print(f"Index discover report saved: {out}")
+        else:
+            sys.stdout.write(body)
+        return 0
+
+    if action == "track":
+        pool = resolve_index_pool(
+            base_url=base_url,
+            timeout=args.timeout,
+            user_agent=args.user_agent,
+            max_urls=args.max_urls,
+            extra_low_patterns=extra_low_patterns,
+            urls_file=args.urls_file or "",
+            discover_report_file=args.discover_report or "",
+        )
+        if not pool:
+            raise ValueError("no URLs available for tracking")
+
+        domain = normalize_domain(base_url)
+        snapshots = list_index_track_snapshots(history_dir, domain)
+        previous_snapshot = snapshots[-1] if snapshots else None
+        previous_records = load_track_records(previous_snapshot) if previous_snapshot else {}
+
+        current_records: List[Dict[str, object]] = []
+        for item in pool:
+            url = str(item.get("url") or "")
+            group = str(item.get("group") or "other")
+            probed = probe_index_status(
+                url=url,
+                timeout=args.timeout,
+                user_agent=args.user_agent,
+                search_depth=args.search_depth,
+                strict_search=bool(args.strict_search),
+            )
+            probed["group"] = group
+            current_records.append(probed)
+
+        merged = merge_index_track_records(current_records, previous_records)
+        changes = compute_index_track_changes(
+            records=merged,
+            previous_records=previous_records,
+            long_unindexed_days=args.long_unindexed_days,
+        )
+        summary = summarize_index_track_records(merged)
+        report = {
+            "meta": {
+                "target": base_url,
+                "target_domain": domain,
+                "generated_at_utc": now_utc(),
+                "tool": "geo-llms-toolkit standalone-cli",
+                "version": TOOL_VERSION,
+                "previous_snapshot": str(previous_snapshot) if previous_snapshot else "",
+            },
+            "summary": summary,
+            "changes": changes,
+            "records": merged,
+        }
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        snapshot_path = history_dir / f"index-track-{domain}-{stamp}.json"
+        write_text(snapshot_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+
+        if args.alert_webhook and (len(changes["dropped_indexed"]) > 0 or len(changes["long_unindexed"]) > 0):
+            payload = {
+                "event": "geo_index_alert",
+                "target": base_url,
+                "generated_at_utc": report["meta"]["generated_at_utc"],
+                "summary": summary,
+                "changes": {
+                    "dropped_indexed": changes["dropped_indexed"][:20],
+                    "long_unindexed": changes["long_unindexed"][:20],
+                },
+            }
+            ok, detail = execute_webhook(args.alert_webhook, args.alert_webhook_token or "", payload, args.timeout)
+            report["meta"]["alert_webhook_status"] = "sent" if ok else "failed"
+            report["meta"]["alert_webhook_detail"] = detail
+            write_text(snapshot_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+
+        body = render_index_track_output(report, args.format)
+        if args.output:
+            out = Path(args.output).expanduser().resolve()
+            write_text(out, body)
+            print(f"Index track report saved: {out}")
+        else:
+            sys.stdout.write(body)
+            print(f"\nSnapshot saved: {snapshot_path}")
+
+        if args.alert_on_drop and len(changes["dropped_indexed"]) > 0:
+            return 3
+        return 0
+
+    if action == "submit":
+        pool: List[Dict[str, object]] = []
+        status_filter = normalize_status_filter(args.status_filter)
+        if args.from_track_report:
+            pool = load_index_pool_from_track_report(Path(args.from_track_report).expanduser().resolve(), status_filter)
+        else:
+            pool = resolve_index_pool(
+                base_url=base_url,
+                timeout=args.timeout,
+                user_agent=args.user_agent,
+                max_urls=args.max_urls,
+                extra_low_patterns=extra_low_patterns,
+                urls_file=args.urls_file or "",
+                discover_report_file=args.discover_report or "",
+            )
+        if not pool:
+            raise ValueError("no URLs available for submit")
+
+        provider = str(args.provider)
+        token = args.google_token or os.environ.get("GOOGLE_INDEXING_TOKEN", "")
+        items = []
+        submitted = failed = skipped = 0
+        for item in pool:
+            url = str(item.get("url") or "")
+            group = str(item.get("group") or "other")
+            row = {"url": url, "group": group, "provider": provider}
+
+            if provider == "dry-run":
+                row["status"] = "submitted"
+                row["detail"] = "dry-run"
+                submitted += 1
+                items.append(row)
+                continue
+
+            if provider == "google-indexing":
+                if (not args.allow_unsupported_google_types) and (not is_google_indexing_supported_url(url)):
+                    row["status"] = "skipped"
+                    row["detail"] = "unsupported_for_google_indexing_api"
+                    skipped += 1
+                    items.append(row)
+                    continue
+                ok, detail = submit_to_google_indexing_api(
+                    url=url,
+                    token=token,
+                    timeout=args.timeout,
+                    notification_type=args.notification_type,
+                )
+                row["status"] = "submitted" if ok else "failed"
+                row["detail"] = detail
+                if ok:
+                    submitted += 1
+                else:
+                    failed += 1
+                items.append(row)
+                continue
+
+            if provider == "webhook":
+                if not args.webhook_url:
+                    raise ValueError("webhook-url is required when provider=webhook")
+                payload = {
+                    "event": "geo_index_submit",
+                    "target_domain": normalize_domain(base_url),
+                    "url": url,
+                    "type": args.notification_type,
+                }
+                ok, detail = execute_webhook(args.webhook_url, args.webhook_token or "", payload, args.timeout)
+                row["status"] = "submitted" if ok else "failed"
+                row["detail"] = detail
+                if ok:
+                    submitted += 1
+                else:
+                    failed += 1
+                items.append(row)
+                continue
+
+            if provider == "command":
+                if not args.command_template:
+                    raise ValueError("command-template is required when provider=command")
+                payload = {
+                    "url": url,
+                    "type": args.notification_type,
+                    "target_domain": normalize_domain(base_url),
+                    "provider": provider,
+                }
+                ok, detail = execute_index_submit_command(args.command_template, payload, args.timeout)
+                row["status"] = "submitted" if ok else "failed"
+                row["detail"] = detail
+                if ok:
+                    submitted += 1
+                else:
+                    failed += 1
+                items.append(row)
+                continue
+
+            raise ValueError(f"unsupported provider: {provider}")
+
+        report = {
+            "meta": {
+                "target": base_url,
+                "target_domain": normalize_domain(base_url),
+                "generated_at_utc": now_utc(),
+                "provider": provider,
+                "notification_type": args.notification_type,
+            },
+            "summary": {
+                "total": len(items),
+                "submitted": submitted,
+                "skipped": skipped,
+                "failed": failed,
+            },
+            "items": items,
+        }
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        log_path = history_dir / f"index-submit-{normalize_domain(base_url)}-{stamp}.json"
+        write_text(log_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+
+        body = render_index_submit_output(report, args.format)
+        if args.output:
+            out = Path(args.output).expanduser().resolve()
+            write_text(out, body)
+            print(f"Index submit report saved: {out}")
+        else:
+            sys.stdout.write(body)
+            print(f"\nSubmit log saved: {log_path}")
+        return 0 if failed == 0 else 3
+
+    if action == "audit":
+        status_filter = normalize_status_filter(args.status_filter)
+        if args.from_track_report:
+            pool = load_index_pool_from_track_report(Path(args.from_track_report).expanduser().resolve(), status_filter)
+        else:
+            pool = resolve_index_pool(
+                base_url=base_url,
+                timeout=args.timeout,
+                user_agent=args.user_agent,
+                max_urls=args.max_urls,
+                extra_low_patterns=extra_low_patterns,
+                urls_file=args.urls_file or "",
+                discover_report_file=args.discover_report or "",
+            )
+        if not pool:
+            raise ValueError("no URLs available for audit")
+
+        home = fetch_url(base_url + "/", timeout=args.timeout, user_agent=args.user_agent, max_bytes=1_200_000)
+        homepage_body = (home.body or "").lower() if home.status == 200 else ""
+        llms_set = set()
+        for p in ["/llms.txt", "/llms-full.txt"]:
+            r = fetch_url(base_url + p, timeout=args.timeout, user_agent=args.user_agent, max_bytes=1_200_000)
+            if r.status == 200:
+                for u in extract_urls_from_text(r.body, normalize_domain(base_url)):
+                    key = normalize_url_for_compare(u)
+                    if key:
+                        llms_set.add(key)
+
+        records = []
+        issue_counter: Dict[str, Dict[str, object]] = {}
+        pass_count = warn_count = fail_count = p0 = p1 = p2 = 0
+        for item in pool:
+            row = audit_index_url(
+                url=str(item.get("url") or ""),
+                group=str(item.get("group") or "other"),
+                timeout=args.timeout,
+                user_agent=args.user_agent,
+                thin_threshold_chars=args.thin_threshold_chars,
+                homepage_body=homepage_body,
+                llms_url_set=llms_set,
+            )
+            records.append(row)
+            if row["status"] == "pass":
+                pass_count += 1
+            elif row["status"] == "warn":
+                warn_count += 1
+            else:
+                fail_count += 1
+            if row["max_priority"] == "P0":
+                p0 += 1
+            elif row["max_priority"] == "P1":
+                p1 += 1
+            elif row["max_priority"] == "P2":
+                p2 += 1
+
+            for issue in row.get("issues", []):
+                if not isinstance(issue, dict):
+                    continue
+                code = str(issue.get("code") or "")
+                if not code:
+                    continue
+                info = issue_counter.setdefault(
+                    code,
+                    {
+                        "code": code,
+                        "priority": issue.get("priority", ""),
+                        "count": 0,
+                        "fix": issue.get("fix", ""),
+                    },
+                )
+                info["count"] = int(info["count"]) + 1
+
+        issues_summary = sorted(issue_counter.values(), key=lambda x: (str(x.get("priority")), -int(x.get("count", 0))))
+        report = {
+            "meta": {
+                "target": base_url,
+                "target_domain": normalize_domain(base_url),
+                "generated_at_utc": now_utc(),
+            },
+            "summary": {
+                "total": len(records),
+                "pass": pass_count,
+                "warn": warn_count,
+                "fail": fail_count,
+                "p0": p0,
+                "p1": p1,
+                "p2": p2,
+            },
+            "issues_summary": issues_summary,
+            "records": records,
+        }
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        snapshot_path = history_dir / f"index-audit-{normalize_domain(base_url)}-{stamp}.json"
+        write_text(snapshot_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+
+        body = render_index_audit_output(report, args.format)
+        if args.output:
+            out = Path(args.output).expanduser().resolve()
+            write_text(out, body)
+            print(f"Index audit report saved: {out}")
+        else:
+            sys.stdout.write(body)
+            print(f"\nAudit log saved: {snapshot_path}")
+        return 0 if fail_count == 0 else 2
+
+    if action == "report":
+        report = build_index_report_from_history(base_url, history_dir=history_dir, days=args.days)
+        body = render_index_report_output(report, args.format)
+        if args.output:
+            out = Path(args.output).expanduser().resolve()
+            write_text(out, body)
+            print(f"Index report saved: {out}")
+        else:
+            sys.stdout.write(body)
+        return 0
+
+    raise ValueError(f"unsupported index action: {action}")
+
+
 def handle_scan(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.target)
     report = run_scan(base_url, timeout=args.timeout, user_agent=args.user_agent, max_urls=args.max_urls)
@@ -2953,7 +4477,7 @@ def handle_all(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="geo",
-        description="GEO LLMs Toolkit standalone CLI (scan + llms + monitor + monitor-diff + outreach).",
+        description="GEO LLMs Toolkit standalone CLI (scan + llms + monitor + outreach + index).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -3012,6 +4536,43 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_diff_p.add_argument("--format", choices=["markdown", "json", "csv"], default="markdown")
     monitor_diff_p.add_argument("--output", help="Write diff report to a file path.")
     monitor_diff_p.set_defaults(func=handle_monitor_diff)
+
+    index_p = sub.add_parser(
+        "index",
+        help="Index workflow: discover / track / submit / audit / report.",
+    )
+    index_p.add_argument("index_action", choices=["discover", "track", "submit", "audit", "report"])
+    index_p.add_argument("target", help="Domain or URL, e.g. aronhouyu.com")
+    index_p.add_argument("--format", choices=["markdown", "json", "csv"], default="markdown")
+    index_p.add_argument("--output", help="Write output to file.")
+    index_p.add_argument("--history-dir", default=".geo-history/index", help="History/log directory for index workflows.")
+    index_p.add_argument("--max-urls", type=int, default=220, help="Max URLs in index pool.")
+    index_p.add_argument("--urls-file", help="Manual URL file (txt/csv/tsv/json).")
+    index_p.add_argument("--discover-report", help="Use URL pool from `geo index discover --format json` output.")
+    index_p.add_argument("--from-track-report", help="Use URLs from a `geo index track --format json` report.")
+    index_p.add_argument("--status-filter", default="not_indexed,unknown", help="Statuses for submit/audit from track report.")
+    index_p.add_argument("--search-depth", type=int, default=8, help="SERP depth for index track verification.")
+    index_p.add_argument("--strict-search", action="store_true", help="Treat search no-match as not_indexed instead of unknown.")
+    index_p.add_argument("--long-unindexed-days", type=int, default=14, help="Threshold for long unindexed list.")
+    index_p.add_argument("--alert-on-drop", action="store_true", help="Exit non-zero if dropped indexed URLs are found.")
+    index_p.add_argument("--alert-webhook", help="Optional webhook URL for drop/long-unindexed alerts.")
+    index_p.add_argument("--alert-webhook-token", help="Bearer token for alert webhook.")
+    index_p.add_argument("--provider", choices=["dry-run", "google-indexing", "webhook", "command"], default="dry-run")
+    index_p.add_argument("--notification-type", choices=["URL_UPDATED", "URL_DELETED"], default="URL_UPDATED")
+    index_p.add_argument("--google-token", help="OAuth access token for Google Indexing API.")
+    index_p.add_argument("--allow-unsupported-google-types", action="store_true")
+    index_p.add_argument("--webhook-url", help="Webhook endpoint for submit provider.")
+    index_p.add_argument("--webhook-token", help="Webhook bearer token.")
+    index_p.add_argument(
+        "--command-template",
+        help="Command template for submit provider=command. Vars: {url} {type} {target_domain} {provider} and *_q variants.",
+    )
+    index_p.add_argument("--thin-threshold-chars", type=int, default=380, help="Thin content threshold for index audit.")
+    index_p.add_argument("--low-value-pattern", action="append", help="Extra regex for low-value URL grouping.")
+    index_p.add_argument("--days", type=int, default=30, help="Window days for index report.")
+    index_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    index_p.add_argument("--user-agent", default=DEFAULT_UA)
+    index_p.set_defaults(func=handle_index)
 
     outreach_p = sub.add_parser(
         "outreach",

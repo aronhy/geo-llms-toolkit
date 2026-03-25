@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GEO LLMS Auto Regenerator
  * Description: Auto-regenerate llms.txt and llms-full.txt, scan GEO health, and apply safe fixes.
- * Version: 1.6.0
+ * Version: 1.7.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: aronhouyu
@@ -33,12 +33,19 @@ if (!defined('ABSPATH')) {
 }
 
 final class GEO_LLMS_Auto_Regenerator {
-    const VERSION = '1.6.0';
+    const VERSION = '1.7.0';
     const ADMIN_SLUG = 'geo-llms-auto';
     const EVENT_HOOK = 'geo_llms_autogen_regenerate';
     const OPTION_KEY = 'geo_llms_autogen_last_result';
     const SCAN_OPTION_KEY = 'geo_llms_autogen_last_scan';
     const SCAN_HISTORY_OPTION_KEY = 'geo_llms_autogen_scan_history';
+    const MONITOR_OPTION_KEY = 'geo_llms_autogen_monitor_last';
+    const MONITOR_HISTORY_OPTION_KEY = 'geo_llms_autogen_monitor_history';
+    const OUTREACH_OPTION_KEY = 'geo_llms_autogen_outreach_campaign';
+    const OUTREACH_HISTORY_OPTION_KEY = 'geo_llms_autogen_outreach_history';
+    const INDEX_OPTION_KEY = 'geo_llms_autogen_index_last';
+    const INDEX_HISTORY_OPTION_KEY = 'geo_llms_autogen_index_history';
+    const INDEX_SUBMIT_HISTORY_OPTION_KEY = 'geo_llms_autogen_index_submit_history';
     const SETTINGS_OPTION_KEY = 'geo_llms_autogen_settings';
     const NOTICE_OPTION_KEY = 'geo_llms_autogen_notice';
     const PREVIEW_OPTION_KEY = 'geo_llms_autogen_fix_preview';
@@ -74,6 +81,15 @@ final class GEO_LLMS_Auto_Regenerator {
         add_action('admin_post_geo_llms_export_settings', array(__CLASS__, 'handle_export_settings'));
         add_action('admin_post_geo_llms_import_settings', array(__CLASS__, 'handle_import_settings'));
         add_action('admin_post_geo_llms_clear_logs', array(__CLASS__, 'handle_clear_logs'));
+        add_action('admin_post_geo_llms_run_monitor', array(__CLASS__, 'handle_run_monitor'));
+        add_action('admin_post_geo_llms_run_outreach_plan', array(__CLASS__, 'handle_run_outreach_plan'));
+        add_action('admin_post_geo_llms_run_outreach', array(__CLASS__, 'handle_run_outreach'));
+        add_action('admin_post_geo_llms_verify_outreach', array(__CLASS__, 'handle_verify_outreach'));
+        add_action('admin_post_geo_llms_run_index_discover', array(__CLASS__, 'handle_run_index_discover'));
+        add_action('admin_post_geo_llms_run_index_track', array(__CLASS__, 'handle_run_index_track'));
+        add_action('admin_post_geo_llms_run_index_submit', array(__CLASS__, 'handle_run_index_submit'));
+        add_action('admin_post_geo_llms_run_index_audit', array(__CLASS__, 'handle_run_index_audit'));
+        add_action('admin_post_geo_llms_run_index_report', array(__CLASS__, 'handle_run_index_report'));
         add_action('add_meta_boxes', array(__CLASS__, 'register_meta_boxes'));
         add_action('save_post', array(__CLASS__, 'save_post_llms_meta'), 20, 2);
         add_action(self::SCAN_CRON_HOOK, array(__CLASS__, 'run_scheduled_scan'));
@@ -761,6 +777,39 @@ final class GEO_LLMS_Auto_Regenerator {
             'cache_purge_additional_urls' => '',
             'organization_logo_url' => '',
             'organization_sameas' => '',
+            'monitor_keywords' => '',
+            'monitor_competitors' => '',
+            'monitor_discover_competitors' => 1,
+            'monitor_serp_depth' => 10,
+            'monitor_max_keywords' => 80,
+            'monitor_max_discovered' => 8,
+            'monitor_weight_keyword_overlap' => 45,
+            'monitor_weight_serp_coappear' => 35,
+            'monitor_weight_rank_pressure' => 20,
+            'outreach_pitch_url' => '',
+            'outreach_site_name' => get_bloginfo('name'),
+            'outreach_offer' => 'Resource inclusion request',
+            'outreach_provider' => 'dry-run',
+            'outreach_webhook_url' => '',
+            'outreach_webhook_token' => '',
+            'outreach_command_template' => '',
+            'outreach_max_prospects' => 30,
+            'outreach_min_prospect_score' => 8,
+            'outreach_min_opportunities' => 1,
+            'outreach_cooldown_days' => 21,
+            'outreach_followup_days' => 7,
+            'index_max_urls' => 220,
+            'index_search_depth' => 8,
+            'index_long_unindexed_days' => 14,
+            'index_submit_provider' => 'webhook',
+            'index_submit_status_filter' => 'not_indexed,unknown',
+            'index_google_token' => '',
+            'index_allow_unsupported_google_types' => 0,
+            'index_webhook_url' => '',
+            'index_webhook_token' => '',
+            'index_command_template' => '',
+            'index_thin_threshold_chars' => 380,
+            'index_report_days' => 30,
         );
     }
 
@@ -819,6 +868,39 @@ final class GEO_LLMS_Auto_Regenerator {
         $settings['cache_purge_additional_urls'] = self::sanitize_url_lines(isset($input['cache_purge_additional_urls']) ? $input['cache_purge_additional_urls'] : '');
         $settings['organization_logo_url'] = self::sanitize_single_url(isset($input['organization_logo_url']) ? $input['organization_logo_url'] : '');
         $settings['organization_sameas'] = self::sanitize_sameas_links(isset($input['organization_sameas']) ? $input['organization_sameas'] : '');
+        $settings['monitor_keywords'] = self::sanitize_template_text(isset($input['monitor_keywords']) ? $input['monitor_keywords'] : '', true);
+        $settings['monitor_competitors'] = self::sanitize_domain_lines(isset($input['monitor_competitors']) ? $input['monitor_competitors'] : '');
+        $settings['monitor_discover_competitors'] = !empty($input['monitor_discover_competitors']) ? 1 : 0;
+        $settings['monitor_serp_depth'] = max(5, min(50, (int) (isset($input['monitor_serp_depth']) ? $input['monitor_serp_depth'] : 10)));
+        $settings['monitor_max_keywords'] = max(10, min(300, (int) (isset($input['monitor_max_keywords']) ? $input['monitor_max_keywords'] : 80)));
+        $settings['monitor_max_discovered'] = max(0, min(30, (int) (isset($input['monitor_max_discovered']) ? $input['monitor_max_discovered'] : 8)));
+        $settings['monitor_weight_keyword_overlap'] = max(0, min(100, (int) (isset($input['monitor_weight_keyword_overlap']) ? $input['monitor_weight_keyword_overlap'] : 45)));
+        $settings['monitor_weight_serp_coappear'] = max(0, min(100, (int) (isset($input['monitor_weight_serp_coappear']) ? $input['monitor_weight_serp_coappear'] : 35)));
+        $settings['monitor_weight_rank_pressure'] = max(0, min(100, (int) (isset($input['monitor_weight_rank_pressure']) ? $input['monitor_weight_rank_pressure'] : 20)));
+        $settings['outreach_pitch_url'] = self::sanitize_single_url(isset($input['outreach_pitch_url']) ? $input['outreach_pitch_url'] : '');
+        $settings['outreach_site_name'] = sanitize_text_field((string) (isset($input['outreach_site_name']) ? $input['outreach_site_name'] : get_bloginfo('name')));
+        $settings['outreach_offer'] = self::sanitize_template_text(isset($input['outreach_offer']) ? $input['outreach_offer'] : 'Resource inclusion request', false);
+        $settings['outreach_provider'] = self::sanitize_outreach_provider(isset($input['outreach_provider']) ? $input['outreach_provider'] : 'dry-run');
+        $settings['outreach_webhook_url'] = self::sanitize_single_url(isset($input['outreach_webhook_url']) ? $input['outreach_webhook_url'] : '');
+        $settings['outreach_webhook_token'] = self::sanitize_api_token(isset($input['outreach_webhook_token']) ? $input['outreach_webhook_token'] : '');
+        $settings['outreach_command_template'] = self::sanitize_template_text(isset($input['outreach_command_template']) ? $input['outreach_command_template'] : '', true);
+        $settings['outreach_max_prospects'] = max(5, min(200, (int) (isset($input['outreach_max_prospects']) ? $input['outreach_max_prospects'] : 30)));
+        $settings['outreach_min_prospect_score'] = max(0, min(100, (int) (isset($input['outreach_min_prospect_score']) ? $input['outreach_min_prospect_score'] : 8)));
+        $settings['outreach_min_opportunities'] = max(1, min(50, (int) (isset($input['outreach_min_opportunities']) ? $input['outreach_min_opportunities'] : 1)));
+        $settings['outreach_cooldown_days'] = max(1, min(365, (int) (isset($input['outreach_cooldown_days']) ? $input['outreach_cooldown_days'] : 21)));
+        $settings['outreach_followup_days'] = max(1, min(60, (int) (isset($input['outreach_followup_days']) ? $input['outreach_followup_days'] : 7)));
+        $settings['index_max_urls'] = max(20, min(1000, (int) (isset($input['index_max_urls']) ? $input['index_max_urls'] : 220)));
+        $settings['index_search_depth'] = max(5, min(20, (int) (isset($input['index_search_depth']) ? $input['index_search_depth'] : 8)));
+        $settings['index_long_unindexed_days'] = max(1, min(365, (int) (isset($input['index_long_unindexed_days']) ? $input['index_long_unindexed_days'] : 14)));
+        $settings['index_submit_provider'] = self::sanitize_index_submit_provider(isset($input['index_submit_provider']) ? $input['index_submit_provider'] : 'webhook');
+        $settings['index_submit_status_filter'] = self::sanitize_index_status_filter(isset($input['index_submit_status_filter']) ? $input['index_submit_status_filter'] : 'not_indexed,unknown');
+        $settings['index_google_token'] = self::sanitize_api_token(isset($input['index_google_token']) ? $input['index_google_token'] : '');
+        $settings['index_allow_unsupported_google_types'] = !empty($input['index_allow_unsupported_google_types']) ? 1 : 0;
+        $settings['index_webhook_url'] = self::sanitize_single_url(isset($input['index_webhook_url']) ? $input['index_webhook_url'] : '');
+        $settings['index_webhook_token'] = self::sanitize_api_token(isset($input['index_webhook_token']) ? $input['index_webhook_token'] : '');
+        $settings['index_command_template'] = self::sanitize_template_text(isset($input['index_command_template']) ? $input['index_command_template'] : '', true);
+        $settings['index_thin_threshold_chars'] = max(120, min(4000, (int) (isset($input['index_thin_threshold_chars']) ? $input['index_thin_threshold_chars'] : 380)));
+        $settings['index_report_days'] = max(7, min(365, (int) (isset($input['index_report_days']) ? $input['index_report_days'] : 30)));
         return $settings;
     }
 
@@ -891,6 +973,33 @@ final class GEO_LLMS_Auto_Regenerator {
         return in_array($value, array('selected', 'everything'), true) ? $value : 'selected';
     }
 
+    private static function sanitize_outreach_provider($value) {
+        $value = sanitize_key((string) $value);
+        return in_array($value, array('dry-run', 'webhook', 'command'), true) ? $value : 'dry-run';
+    }
+
+    private static function sanitize_index_submit_provider($value) {
+        $value = sanitize_key((string) $value);
+        return in_array($value, array('dry-run', 'google-indexing', 'webhook', 'command'), true) ? $value : 'webhook';
+    }
+
+    private static function sanitize_index_status_filter($value) {
+        $items = array_values(array_filter(array_map('trim', explode(',', strtolower((string) $value)))));
+        $allowed = array('indexed', 'not_indexed', 'unknown');
+        $clean = array();
+        foreach ($items as $item) {
+            if (in_array($item, $allowed, true) && !in_array($item, $clean, true)) {
+                $clean[] = $item;
+            }
+        }
+
+        if (empty($clean)) {
+            $clean = array('not_indexed', 'unknown');
+        }
+
+        return implode(',', $clean);
+    }
+
     private static function sanitize_safe_fix_mode($value) {
         $value = sanitize_key((string) $value);
         return in_array($value, array('strict', 'balanced'), true) ? $value : 'strict';
@@ -957,6 +1066,21 @@ final class GEO_LLMS_Auto_Regenerator {
             $normalized = self::normalize_ref_value($part);
             if ($normalized !== '' && !in_array($normalized, $clean, true)) {
                 $clean[] = $normalized;
+            }
+        }
+
+        return implode("\n", $clean);
+    }
+
+    private static function sanitize_domain_lines($raw) {
+        $raw = str_replace("\r", "\n", (string) $raw);
+        $parts = preg_split('/[\n,]+/', $raw);
+        $clean = array();
+
+        foreach ($parts as $part) {
+            $domain = self::normalize_domain_value($part);
+            if ($domain !== '' && !in_array($domain, $clean, true)) {
+                $clean[] = $domain;
             }
         }
 
@@ -1230,6 +1354,28 @@ final class GEO_LLMS_Auto_Regenerator {
         $limit = self::sanitize_history_limit($limit);
         $history = array_slice(array_values($history), 0, $limit);
         update_option(self::SCAN_HISTORY_OPTION_KEY, $history, false);
+    }
+
+    private static function get_history_option($option_key) {
+        $history = get_option($option_key, array());
+        return is_array($history) ? array_values($history) : array();
+    }
+
+    private static function save_history_option($option_key, array $history, $limit = null) {
+        if ($limit === null) {
+            $settings = self::get_settings();
+            $limit = isset($settings['scan_history_limit']) ? (int) $settings['scan_history_limit'] : 20;
+        }
+
+        $limit = self::sanitize_history_limit($limit);
+        $history = array_slice(array_values($history), 0, $limit);
+        update_option($option_key, $history, false);
+    }
+
+    private static function append_history_option($option_key, array $entry, $limit = null) {
+        $history = self::get_history_option($option_key);
+        array_unshift($history, $entry);
+        self::save_history_option($option_key, $history, $limit);
     }
 
     private static function get_management_capability() {
@@ -1864,10 +2010,15 @@ final class GEO_LLMS_Auto_Regenerator {
 
         $state = get_option(self::OPTION_KEY, array());
         $scan = get_option(self::SCAN_OPTION_KEY, array());
+        $monitor = get_option(self::MONITOR_OPTION_KEY, array());
+        $outreach = get_option(self::OUTREACH_OPTION_KEY, array());
+        $index = get_option(self::INDEX_OPTION_KEY, array());
         $settings = self::get_settings();
         $notice = self::consume_notice();
         $preview = self::get_fix_preview();
         $history = self::get_scan_history();
+        $monitor_history = self::get_history_option(self::MONITOR_HISTORY_OPTION_KEY);
+        $index_history = self::get_history_option(self::INDEX_HISTORY_OPTION_KEY);
         $backup = self::get_settings_backup();
         $logs = self::get_logs();
         $next_scan_ts = wp_next_scheduled(self::SCAN_CRON_HOOK);
@@ -1982,6 +2133,112 @@ final class GEO_LLMS_Auto_Regenerator {
                 <?php if (!empty($backup['time'])) : ?>
                     <p class="geo-help">最近一次可回滚快照：<?php echo esc_html($backup['time']); ?></p>
                 <?php endif; ?>
+            </div>
+
+            <div class="geo-card">
+                <h2>CLI 迁移工作台（Monitor / Outreach / Index）</h2>
+                <div class="geo-grid">
+                    <div class="geo-metric">
+                        <strong>Monitor</strong>
+                        <p class="geo-muted">
+                            <?php
+                            if (!empty($monitor['summary'])) {
+                                echo esc_html(
+                                    '关键词 ' . (int) (isset($monitor['summary']['keywords_total']) ? $monitor['summary']['keywords_total'] : 0)
+                                    . ' / 竞品 ' . (int) (isset($monitor['summary']['competitors_tracked']) ? $monitor['summary']['competitors_tracked'] : 0)
+                                    . ' / 动作 ' . (int) (isset($monitor['summary']['actions_generated']) ? $monitor['summary']['actions_generated'] : 0)
+                                );
+                            } else {
+                                echo '尚未运行';
+                            }
+                            ?>
+                        </p>
+                        <p class="geo-help">历史快照：<?php echo esc_html((string) count($monitor_history)); ?> 条</p>
+                    </div>
+                    <div class="geo-metric">
+                        <strong>Outreach</strong>
+                        <p class="geo-muted">
+                            <?php
+                            $outreach_summary = isset($outreach['summary']) && is_array($outreach['summary']) ? $outreach['summary'] : array();
+                            if (!empty($outreach_summary)) {
+                                echo esc_html(
+                                    'Prospects ' . (int) (isset($outreach_summary['prospects_total']) ? $outreach_summary['prospects_total'] : 0)
+                                    . ' / Sent ' . (int) (isset($outreach_summary['sent']) ? $outreach_summary['sent'] : 0)
+                                    . ' / Won ' . (int) (isset($outreach_summary['won']) ? $outreach_summary['won'] : 0)
+                                );
+                            } else {
+                                echo '尚未生成';
+                            }
+                            ?>
+                        </p>
+                        <p class="geo-help">先跑 Monitor，再生成计划并执行。</p>
+                    </div>
+                    <div class="geo-metric">
+                        <strong>Index</strong>
+                        <p class="geo-muted">
+                            <?php
+                            $track_summary = isset($index['track']['summary']) && is_array($index['track']['summary']) ? $index['track']['summary'] : array();
+                            if (!empty($track_summary)) {
+                                echo esc_html(
+                                    '总 URL ' . (int) (isset($track_summary['total']) ? $track_summary['total'] : 0)
+                                    . ' / Indexed ' . (int) (isset($track_summary['indexed']) ? $track_summary['indexed'] : 0)
+                                    . ' / Not indexed ' . (int) (isset($track_summary['not_indexed']) ? $track_summary['not_indexed'] : 0)
+                                );
+                            } else {
+                                echo '尚未运行';
+                            }
+                            ?>
+                        </p>
+                        <p class="geo-help">历史快照：<?php echo esc_html((string) count($index_history)); ?> 条</p>
+                    </div>
+                </div>
+                <div class="geo-actions">
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_monitor'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_monitor">
+                        <?php submit_button('运行 Monitor', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_outreach_plan'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_outreach_plan">
+                        <?php submit_button('生成 Outreach 计划', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_outreach'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_outreach">
+                        <?php submit_button('执行 Outreach', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_verify_outreach'); ?>
+                        <input type="hidden" name="action" value="geo_llms_verify_outreach">
+                        <?php submit_button('验证 Outreach', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_index_discover'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_index_discover">
+                        <?php submit_button('Index Discover', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_index_track'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_index_track">
+                        <?php submit_button('Index Track', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_index_submit'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_index_submit">
+                        <?php submit_button('Index Submit', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_index_audit'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_index_audit">
+                        <?php submit_button('Index Audit', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_index_report'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_index_report">
+                        <?php submit_button('Index Report', 'secondary', 'submit', false); ?>
+                    </form>
+                </div>
             </div>
 
             <?php if (!empty($preview)) : ?>
@@ -2173,6 +2430,154 @@ final class GEO_LLMS_Auto_Regenerator {
                         <textarea id="geo-cache-extra-urls" class="geo-textarea code" name="settings[cache_purge_additional_urls]" placeholder="/category/ai/&#10;https://example.com/special-page/"><?php echo esc_textarea(isset($settings['cache_purge_additional_urls']) ? $settings['cache_purge_additional_urls'] : ''); ?></textarea>
                     </p>
                     <p class="geo-help">默认会清理首页、llms、robots、sitemap，以及本次内容更新涉及的文章 / 作者 / 分类 URL。这里可额外补你自己的栏目页或聚合页。</p>
+
+                    <h3>CLI 迁移设置：Monitor</h3>
+                    <p>
+                        <label for="geo-monitor-keywords"><strong>关键词列表</strong></label><br>
+                        <textarea id="geo-monitor-keywords" class="geo-textarea code" name="settings[monitor_keywords]" placeholder="ai tools&#10;seo agent&#10;geo optimization"><?php echo esc_textarea(isset($settings['monitor_keywords']) ? $settings['monitor_keywords'] : ''); ?></textarea>
+                    </p>
+                    <p class="geo-help">每行一个关键词。留空时会自动用站点最近文章标题生成关键词。</p>
+                    <p>
+                        <label for="geo-monitor-competitors"><strong>竞品域名（可选）</strong></label><br>
+                        <textarea id="geo-monitor-competitors" class="geo-textarea code" name="settings[monitor_competitors]" placeholder="example.com&#10;competitor.io"><?php echo esc_textarea(isset($settings['monitor_competitors']) ? $settings['monitor_competitors'] : ''); ?></textarea>
+                    </p>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[monitor_discover_competitors]" value="1" <?php checked(!empty($settings['monitor_discover_competitors'])); ?>>
+                        自动从 SERP 发现竞品
+                    </label>
+                    <p>
+                        <label for="geo-monitor-serp-depth"><strong>SERP 深度</strong></label><br>
+                        <input id="geo-monitor-serp-depth" type="number" min="5" max="50" name="settings[monitor_serp_depth]" value="<?php echo esc_attr(isset($settings['monitor_serp_depth']) ? $settings['monitor_serp_depth'] : 10); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-monitor-max-keywords"><strong>最大关键词数</strong></label><br>
+                        <input id="geo-monitor-max-keywords" type="number" min="10" max="300" name="settings[monitor_max_keywords]" value="<?php echo esc_attr(isset($settings['monitor_max_keywords']) ? $settings['monitor_max_keywords'] : 80); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-monitor-max-discovered"><strong>自动发现竞品上限</strong></label><br>
+                        <input id="geo-monitor-max-discovered" type="number" min="0" max="30" name="settings[monitor_max_discovered]" value="<?php echo esc_attr(isset($settings['monitor_max_discovered']) ? $settings['monitor_max_discovered'] : 8); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-monitor-weight-overlap"><strong>权重：关键词重叠（%）</strong></label><br>
+                        <input id="geo-monitor-weight-overlap" type="number" min="0" max="100" name="settings[monitor_weight_keyword_overlap]" value="<?php echo esc_attr(isset($settings['monitor_weight_keyword_overlap']) ? $settings['monitor_weight_keyword_overlap'] : 45); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-monitor-weight-coappear"><strong>权重：同页共现（%）</strong></label><br>
+                        <input id="geo-monitor-weight-coappear" type="number" min="0" max="100" name="settings[monitor_weight_serp_coappear]" value="<?php echo esc_attr(isset($settings['monitor_weight_serp_coappear']) ? $settings['monitor_weight_serp_coappear'] : 35); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-monitor-weight-pressure"><strong>权重：排名压力（%）</strong></label><br>
+                        <input id="geo-monitor-weight-pressure" type="number" min="0" max="100" name="settings[monitor_weight_rank_pressure]" value="<?php echo esc_attr(isset($settings['monitor_weight_rank_pressure']) ? $settings['monitor_weight_rank_pressure'] : 20); ?>">
+                    </p>
+
+                    <h3>CLI 迁移设置：Outreach</h3>
+                    <p>
+                        <label for="geo-outreach-pitch-url"><strong>推广 URL（Pitch URL）</strong></label><br>
+                        <input id="geo-outreach-pitch-url" class="regular-text code" type="url" name="settings[outreach_pitch_url]" value="<?php echo esc_attr(isset($settings['outreach_pitch_url']) ? $settings['outreach_pitch_url'] : ''); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-site-name"><strong>发件站点名称</strong></label><br>
+                        <input id="geo-outreach-site-name" class="regular-text" type="text" name="settings[outreach_site_name]" value="<?php echo esc_attr(isset($settings['outreach_site_name']) ? $settings['outreach_site_name'] : get_bloginfo('name')); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-offer"><strong>Outreach Offer</strong></label><br>
+                        <input id="geo-outreach-offer" class="regular-text" type="text" name="settings[outreach_offer]" value="<?php echo esc_attr(isset($settings['outreach_offer']) ? $settings['outreach_offer'] : 'Resource inclusion request'); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-provider"><strong>执行方式</strong></label><br>
+                        <select id="geo-outreach-provider" name="settings[outreach_provider]">
+                            <option value="dry-run" <?php selected(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run', 'dry-run'); ?>>dry-run</option>
+                            <option value="webhook" <?php selected(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run', 'webhook'); ?>>webhook</option>
+                            <option value="command" <?php selected(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run', 'command'); ?>>command</option>
+                        </select>
+                    </p>
+                    <p>
+                        <label for="geo-outreach-webhook-url"><strong>Outreach Webhook URL</strong></label><br>
+                        <input id="geo-outreach-webhook-url" class="regular-text code" type="url" name="settings[outreach_webhook_url]" value="<?php echo esc_attr(isset($settings['outreach_webhook_url']) ? $settings['outreach_webhook_url'] : ''); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-webhook-token"><strong>Outreach Webhook Token</strong></label><br>
+                        <input id="geo-outreach-webhook-token" class="regular-text code" type="password" autocomplete="new-password" name="settings[outreach_webhook_token]" value="<?php echo esc_attr(isset($settings['outreach_webhook_token']) ? $settings['outreach_webhook_token'] : ''); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-command-template"><strong>Outreach Command Template</strong></label><br>
+                        <textarea id="geo-outreach-command-template" class="geo-textarea code" name="settings[outreach_command_template]" placeholder="python3 run_outreach.py --domain {domain_q} --keyword {keyword_q} --url {pitch_url_q}"><?php echo esc_textarea(isset($settings['outreach_command_template']) ? $settings['outreach_command_template'] : ''); ?></textarea>
+                    </p>
+                    <p>
+                        <label for="geo-outreach-max-prospects"><strong>Prospects 上限</strong></label><br>
+                        <input id="geo-outreach-max-prospects" type="number" min="5" max="200" name="settings[outreach_max_prospects]" value="<?php echo esc_attr(isset($settings['outreach_max_prospects']) ? $settings['outreach_max_prospects'] : 30); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-min-score"><strong>最小 Prospect Score</strong></label><br>
+                        <input id="geo-outreach-min-score" type="number" min="0" max="100" name="settings[outreach_min_prospect_score]" value="<?php echo esc_attr(isset($settings['outreach_min_prospect_score']) ? $settings['outreach_min_prospect_score'] : 8); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-min-opps"><strong>最小机会数</strong></label><br>
+                        <input id="geo-outreach-min-opps" type="number" min="1" max="50" name="settings[outreach_min_opportunities]" value="<?php echo esc_attr(isset($settings['outreach_min_opportunities']) ? $settings['outreach_min_opportunities'] : 1); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-cooldown"><strong>冷却天数（only-new）</strong></label><br>
+                        <input id="geo-outreach-cooldown" type="number" min="1" max="365" name="settings[outreach_cooldown_days]" value="<?php echo esc_attr(isset($settings['outreach_cooldown_days']) ? $settings['outreach_cooldown_days'] : 21); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-followup"><strong>Follow-up 天数</strong></label><br>
+                        <input id="geo-outreach-followup" type="number" min="1" max="60" name="settings[outreach_followup_days]" value="<?php echo esc_attr(isset($settings['outreach_followup_days']) ? $settings['outreach_followup_days'] : 7); ?>">
+                    </p>
+
+                    <h3>CLI 迁移设置：Index</h3>
+                    <p>
+                        <label for="geo-index-max-urls"><strong>索引池最大 URL 数</strong></label><br>
+                        <input id="geo-index-max-urls" type="number" min="20" max="1000" name="settings[index_max_urls]" value="<?php echo esc_attr(isset($settings['index_max_urls']) ? $settings['index_max_urls'] : 220); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-search-depth"><strong>索引检查 SERP 深度</strong></label><br>
+                        <input id="geo-index-search-depth" type="number" min="5" max="20" name="settings[index_search_depth]" value="<?php echo esc_attr(isset($settings['index_search_depth']) ? $settings['index_search_depth'] : 8); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-long-days"><strong>长期未收录阈值（天）</strong></label><br>
+                        <input id="geo-index-long-days" type="number" min="1" max="365" name="settings[index_long_unindexed_days]" value="<?php echo esc_attr(isset($settings['index_long_unindexed_days']) ? $settings['index_long_unindexed_days'] : 14); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-submit-provider"><strong>提交方式</strong></label><br>
+                        <select id="geo-index-submit-provider" name="settings[index_submit_provider]">
+                            <option value="dry-run" <?php selected(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook', 'dry-run'); ?>>dry-run</option>
+                            <option value="google-indexing" <?php selected(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook', 'google-indexing'); ?>>google-indexing</option>
+                            <option value="webhook" <?php selected(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook', 'webhook'); ?>>webhook</option>
+                            <option value="command" <?php selected(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook', 'command'); ?>>command</option>
+                        </select>
+                    </p>
+                    <p>
+                        <label for="geo-index-submit-filter"><strong>提交状态过滤</strong></label><br>
+                        <input id="geo-index-submit-filter" class="regular-text code" type="text" name="settings[index_submit_status_filter]" value="<?php echo esc_attr(isset($settings['index_submit_status_filter']) ? $settings['index_submit_status_filter'] : 'not_indexed,unknown'); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-google-token"><strong>Google Indexing Token</strong></label><br>
+                        <input id="geo-index-google-token" class="regular-text code" type="password" autocomplete="new-password" name="settings[index_google_token]" value="<?php echo esc_attr(isset($settings['index_google_token']) ? $settings['index_google_token'] : ''); ?>">
+                    </p>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[index_allow_unsupported_google_types]" value="1" <?php checked(!empty($settings['index_allow_unsupported_google_types'])); ?>>
+                        允许对非 Job/Live URL 也尝试 Google Indexing API
+                    </label>
+                    <p>
+                        <label for="geo-index-webhook-url"><strong>Index Submit Webhook URL</strong></label><br>
+                        <input id="geo-index-webhook-url" class="regular-text code" type="url" name="settings[index_webhook_url]" value="<?php echo esc_attr(isset($settings['index_webhook_url']) ? $settings['index_webhook_url'] : ''); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-webhook-token"><strong>Index Submit Webhook Token</strong></label><br>
+                        <input id="geo-index-webhook-token" class="regular-text code" type="password" autocomplete="new-password" name="settings[index_webhook_token]" value="<?php echo esc_attr(isset($settings['index_webhook_token']) ? $settings['index_webhook_token'] : ''); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-command-template"><strong>Index Submit Command Template</strong></label><br>
+                        <textarea id="geo-index-command-template" class="geo-textarea code" name="settings[index_command_template]" placeholder="python3 submit_index.py --url {url_q} --type {type_q}"><?php echo esc_textarea(isset($settings['index_command_template']) ? $settings['index_command_template'] : ''); ?></textarea>
+                    </p>
+                    <p>
+                        <label for="geo-index-thin-threshold"><strong>薄内容阈值（字符）</strong></label><br>
+                        <input id="geo-index-thin-threshold" type="number" min="120" max="4000" name="settings[index_thin_threshold_chars]" value="<?php echo esc_attr(isset($settings['index_thin_threshold_chars']) ? $settings['index_thin_threshold_chars'] : 380); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-report-days"><strong>Index 周报窗口（天）</strong></label><br>
+                        <input id="geo-index-report-days" type="number" min="7" max="365" name="settings[index_report_days]" value="<?php echo esc_attr(isset($settings['index_report_days']) ? $settings['index_report_days'] : 30); ?>">
+                    </p>
 
                     <h3>定时扫描与历史</h3>
                     <label class="geo-checkbox">
@@ -2798,6 +3203,2872 @@ final class GEO_LLMS_Auto_Regenerator {
         self::set_notice('success', '错误日志已清空。');
         wp_safe_redirect(self::get_admin_page_url());
         exit;
+    }
+
+    public static function handle_run_monitor() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_monitor');
+        $report = self::run_monitor_pipeline(true, 'manual');
+        $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+        $message = 'Monitor 完成：关键词 ' . (int) (isset($summary['keywords_total']) ? $summary['keywords_total'] : 0)
+            . '，竞品 ' . (int) (isset($summary['competitors_tracked']) ? $summary['competitors_tracked'] : 0)
+            . '，动作 ' . (int) (isset($summary['actions_generated']) ? $summary['actions_generated'] : 0) . '。';
+        self::set_notice('success', $message);
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_run_outreach_plan() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_outreach_plan');
+        $outreach = self::run_outreach_plan_pipeline(true, 'manual');
+        $summary = isset($outreach['summary']) && is_array($outreach['summary']) ? $outreach['summary'] : array();
+        $message = 'Outreach 计划已生成：Prospects ' . (int) (isset($summary['prospects_total']) ? $summary['prospects_total'] : 0) . '。';
+        self::set_notice('success', $message);
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_run_outreach() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_outreach');
+        $result = self::run_outreach_execute_pipeline(true, 'manual');
+        $run = isset($result['run']) && is_array($result['run']) ? $result['run'] : array();
+        $message = 'Outreach 执行完成：Sent ' . (int) (isset($run['sent']) ? $run['sent'] : 0)
+            . '，Failed ' . (int) (isset($run['failed']) ? $run['failed'] : 0)
+            . '，Skipped ' . (int) (isset($run['skipped']) ? $run['skipped'] : 0) . '。';
+        self::set_notice('success', $message);
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_verify_outreach() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_verify_outreach');
+        $result = self::run_outreach_verify_pipeline(true, 'manual');
+        $summary = isset($result['verify']) && is_array($result['verify']) ? $result['verify'] : array();
+        $message = 'Outreach 验证完成：Checked ' . (int) (isset($summary['checked']) ? $summary['checked'] : 0)
+            . '，Won ' . (int) (isset($summary['won']) ? $summary['won'] : 0)
+            . '，Follow-up due ' . (int) (isset($summary['followup_due']) ? $summary['followup_due'] : 0) . '。';
+        self::set_notice('success', $message);
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_run_index_discover() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_index_discover');
+        $report = self::run_index_discover_pipeline(true, 'manual');
+        $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+        self::set_notice('success', 'Index discover 完成：URL ' . (int) (isset($summary['urls_total']) ? $summary['urls_total'] : 0) . '。');
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_run_index_track() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_index_track');
+        $report = self::run_index_track_pipeline(true, 'manual');
+        $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+        self::set_notice(
+            'success',
+            'Index track 完成：Indexed ' . (int) (isset($summary['indexed']) ? $summary['indexed'] : 0)
+            . ' / Not indexed ' . (int) (isset($summary['not_indexed']) ? $summary['not_indexed'] : 0)
+            . ' / Unknown ' . (int) (isset($summary['unknown']) ? $summary['unknown'] : 0) . '。'
+        );
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_run_index_submit() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_index_submit');
+        $report = self::run_index_submit_pipeline(true, 'manual');
+        $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+        self::set_notice(
+            'success',
+            'Index submit 完成：Submitted ' . (int) (isset($summary['submitted']) ? $summary['submitted'] : 0)
+            . '，Skipped ' . (int) (isset($summary['skipped']) ? $summary['skipped'] : 0)
+            . '，Failed ' . (int) (isset($summary['failed']) ? $summary['failed'] : 0) . '。'
+        );
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_run_index_audit() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_index_audit');
+        $report = self::run_index_audit_pipeline(true, 'manual');
+        $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+        self::set_notice(
+            'success',
+            'Index audit 完成：Pass ' . (int) (isset($summary['pass']) ? $summary['pass'] : 0)
+            . ' / Warn ' . (int) (isset($summary['warn']) ? $summary['warn'] : 0)
+            . ' / Fail ' . (int) (isset($summary['fail']) ? $summary['fail'] : 0) . '。'
+        );
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_run_index_report() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_index_report');
+        $report = self::run_index_report_pipeline(true, 'manual');
+        $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+        self::set_notice(
+            'success',
+            'Index report 完成：当前收录率 ' . (float) (isset($summary['current_index_rate_pct']) ? $summary['current_index_rate_pct'] : 0) . '%。'
+        );
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    private static function run_monitor_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $base_url = home_url('/');
+        $target_domain = self::normalize_domain_value($base_url);
+        $serp_depth = max(5, min(50, (int) (isset($settings['monitor_serp_depth']) ? $settings['monitor_serp_depth'] : 10)));
+        $max_keywords = max(10, min(300, (int) (isset($settings['monitor_max_keywords']) ? $settings['monitor_max_keywords'] : 80)));
+        $max_discovered = max(0, min(30, (int) (isset($settings['monitor_max_discovered']) ? $settings['monitor_max_discovered'] : 8)));
+        $competitors = self::parse_monitor_competitors(isset($settings['monitor_competitors']) ? $settings['monitor_competitors'] : '', $target_domain);
+        $keywords = self::parse_monitor_keywords(isset($settings['monitor_keywords']) ? $settings['monitor_keywords'] : '', $max_keywords, $target_domain);
+        $weights = self::get_monitor_weights($settings);
+
+        $rows = array();
+        $keyword_hits_target = 0;
+        $keywords_with_serp = 0;
+        $discovered_counts = array();
+
+        foreach ($keywords as $item) {
+            $keyword = isset($item['keyword']) ? (string) $item['keyword'] : '';
+            if ($keyword === '') {
+                continue;
+            }
+
+            $serp = self::fetch_bing_results_for_keyword($keyword, $serp_depth);
+            $domains = isset($serp['domains']) && is_array($serp['domains']) ? $serp['domains'] : array();
+            $rank_by_domain = isset($serp['rank_by_domain']) && is_array($serp['rank_by_domain']) ? $serp['rank_by_domain'] : array();
+
+            if (!empty($domains)) {
+                $keywords_with_serp++;
+            }
+
+            $target_rank = isset($rank_by_domain[$target_domain]) ? (int) $rank_by_domain[$target_domain] : 0;
+            if ($target_rank > 0) {
+                $keyword_hits_target++;
+            }
+
+            foreach ($domains as $domain) {
+                if ($domain !== '' && $domain !== $target_domain) {
+                    $discovered_counts[$domain] = (int) (isset($discovered_counts[$domain]) ? $discovered_counts[$domain] : 0) + 1;
+                }
+            }
+
+            $rows[] = array(
+                'keyword' => $keyword,
+                'group' => isset($item['group']) ? (string) $item['group'] : 'default',
+                'value' => isset($item['value']) ? (float) $item['value'] : 1.0,
+                'is_brand' => !empty($item['is_brand']),
+                'target_rank' => $target_rank,
+                'top_domains' => array_slice($domains, 0, 10),
+                'rank_by_domain' => $rank_by_domain,
+            );
+        }
+
+        if (!empty($settings['monitor_discover_competitors']) && $max_discovered > 0) {
+            arsort($discovered_counts);
+            $existing_count = count($competitors);
+            foreach ($discovered_counts as $domain => $count) {
+                if ($domain === $target_domain || in_array($domain, $competitors, true)) {
+                    continue;
+                }
+                $competitors[] = $domain;
+                if ((count($competitors) - $existing_count) >= $max_discovered) {
+                    break;
+                }
+                if (count($competitors) >= 80) {
+                    break;
+                }
+            }
+            $competitors = array_values(array_unique($competitors));
+        }
+
+        $profiles = self::build_monitor_competitor_profiles($rows, $competitors, $keyword_hits_target, $serp_depth, $weights);
+        $actions = self::build_monitor_priority_actions($rows, $profiles, $serp_depth);
+
+        $report = array(
+            'time' => current_time('mysql'),
+            'trigger' => $trigger,
+            'meta' => array(
+                'target' => $base_url,
+                'target_domain' => $target_domain,
+                'provider' => 'bing-serp',
+                'generated_at' => current_time('mysql'),
+                'serp_depth' => $serp_depth,
+                'weights' => $weights,
+            ),
+            'summary' => array(
+                'keywords_total' => count($rows),
+                'keywords_with_serp_results' => $keywords_with_serp,
+                'keywords_target_ranked' => $keyword_hits_target,
+                'competitors_tracked' => count($profiles),
+                'actions_generated' => count($actions),
+            ),
+            'competitors' => $profiles,
+            'actions' => $actions,
+            'keywords' => $rows,
+        );
+
+        if ($persist) {
+            update_option(self::MONITOR_OPTION_KEY, $report, false);
+            self::append_history_option(
+                self::MONITOR_HISTORY_OPTION_KEY,
+                array(
+                    'time' => $report['time'],
+                    'trigger' => $trigger,
+                    'summary' => $report['summary'],
+                )
+            );
+            self::log_event('info', 'monitor_completed', array(
+                'keywords_total' => (int) $report['summary']['keywords_total'],
+                'competitors_tracked' => (int) $report['summary']['competitors_tracked'],
+                'actions_generated' => (int) $report['summary']['actions_generated'],
+            ));
+        }
+
+        return $report;
+    }
+
+    private static function run_outreach_plan_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $monitor = get_option(self::MONITOR_OPTION_KEY, array());
+        if (empty($monitor) || empty($monitor['keywords'])) {
+            $monitor = self::run_monitor_pipeline($persist, $trigger . '-monitor');
+        }
+
+        $plan = self::build_outreach_plan_from_monitor($monitor, $settings);
+        $campaign = self::build_outreach_campaign_from_plan($plan);
+        $saved = get_option(self::OUTREACH_OPTION_KEY, array());
+        $state_records = isset($saved['state_records']) && is_array($saved['state_records']) ? array_values($saved['state_records']) : array();
+
+        $outreach = array(
+            'time' => current_time('mysql'),
+            'trigger' => $trigger,
+            'meta' => isset($plan['meta']) ? $plan['meta'] : array(),
+            'summary' => isset($campaign['summary']) ? $campaign['summary'] : array(),
+            'plan' => $plan,
+            'campaign' => $campaign,
+            'state_records' => $state_records,
+            'runs' => array(),
+        );
+
+        if ($persist) {
+            update_option(self::OUTREACH_OPTION_KEY, $outreach, false);
+            self::append_history_option(
+                self::OUTREACH_HISTORY_OPTION_KEY,
+                array(
+                    'time' => $outreach['time'],
+                    'event' => 'plan',
+                    'trigger' => $trigger,
+                    'summary' => $outreach['summary'],
+                )
+            );
+            self::log_event('info', 'outreach_plan_generated', array(
+                'prospects_total' => (int) (isset($outreach['summary']['prospects_total']) ? $outreach['summary']['prospects_total'] : 0),
+            ));
+        }
+
+        return $outreach;
+    }
+
+    private static function run_outreach_execute_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $outreach = get_option(self::OUTREACH_OPTION_KEY, array());
+        if (empty($outreach['campaign']) || !is_array($outreach['campaign'])) {
+            $outreach = self::run_outreach_plan_pipeline($persist, $trigger . '-plan');
+        }
+
+        $campaign = isset($outreach['campaign']) && is_array($outreach['campaign']) ? $outreach['campaign'] : array();
+        $state_records = isset($outreach['state_records']) && is_array($outreach['state_records']) ? array_values($outreach['state_records']) : array();
+        $run = self::execute_outreach_campaign($campaign, $state_records, $settings);
+
+        $outreach['time'] = current_time('mysql');
+        $outreach['trigger'] = $trigger;
+        $outreach['campaign'] = $campaign;
+        $outreach['state_records'] = $state_records;
+        $outreach['summary'] = isset($campaign['summary']) ? $campaign['summary'] : array();
+        $runs = isset($outreach['runs']) && is_array($outreach['runs']) ? $outreach['runs'] : array();
+        array_unshift($runs, $run);
+        $outreach['runs'] = array_slice($runs, 0, 30);
+        $outreach['run'] = $run;
+
+        if ($persist) {
+            update_option(self::OUTREACH_OPTION_KEY, $outreach, false);
+            self::append_history_option(
+                self::OUTREACH_HISTORY_OPTION_KEY,
+                array(
+                    'time' => $outreach['time'],
+                    'event' => 'run',
+                    'trigger' => $trigger,
+                    'summary' => $run,
+                )
+            );
+            self::log_event('info', 'outreach_run_completed', array(
+                'sent' => (int) (isset($run['sent']) ? $run['sent'] : 0),
+                'failed' => (int) (isset($run['failed']) ? $run['failed'] : 0),
+                'skipped' => (int) (isset($run['skipped']) ? $run['skipped'] : 0),
+            ));
+        }
+
+        return $outreach;
+    }
+
+    private static function run_outreach_verify_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $outreach = get_option(self::OUTREACH_OPTION_KEY, array());
+        if (empty($outreach['campaign']) || !is_array($outreach['campaign'])) {
+            $outreach = self::run_outreach_plan_pipeline($persist, $trigger . '-plan');
+        }
+
+        $campaign = isset($outreach['campaign']) && is_array($outreach['campaign']) ? $outreach['campaign'] : array();
+        $verify = self::verify_outreach_campaign($campaign, $settings);
+        $outreach['time'] = current_time('mysql');
+        $outreach['trigger'] = $trigger;
+        $outreach['campaign'] = $campaign;
+        $outreach['summary'] = isset($campaign['summary']) ? $campaign['summary'] : array();
+        $outreach['verify'] = $verify;
+
+        if ($persist) {
+            update_option(self::OUTREACH_OPTION_KEY, $outreach, false);
+            self::append_history_option(
+                self::OUTREACH_HISTORY_OPTION_KEY,
+                array(
+                    'time' => $outreach['time'],
+                    'event' => 'verify',
+                    'trigger' => $trigger,
+                    'summary' => $verify,
+                )
+            );
+            self::log_event('info', 'outreach_verify_completed', $verify);
+        }
+
+        return $outreach;
+    }
+
+    private static function run_index_discover_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $base_url = home_url('/');
+        $host = self::normalize_domain_value($base_url);
+        $max_urls = max(20, min(1000, (int) (isset($settings['index_max_urls']) ? $settings['index_max_urls'] : 220)));
+        $source_map = array(
+            'sitemap' => array(),
+            'llms' => array(),
+            'homepage_links' => array(),
+        );
+
+        $source_map['sitemap'] = self::collect_urls_from_site_sitemaps($base_url, $max_urls * 3);
+
+        foreach (array('/llms.txt', '/llms-full.txt') as $path) {
+            $resp = self::fetch_url(home_url($path), array('limit_response_size' => 1500000, 'timeout' => 20));
+            if (empty($resp['error']) && (int) $resp['status_code'] === 200 && self::content_type_matches($resp['content_type'], array('text/plain', 'text/'))) {
+                $urls = self::extract_internal_urls_from_text($resp['body'], $host);
+                foreach ($urls as $url) {
+                    if (!in_array($url, $source_map['llms'], true)) {
+                        $source_map['llms'][] = $url;
+                    }
+                }
+            }
+        }
+
+        $home = self::fetch_url(home_url('/'), array('limit_response_size' => 1500000, 'timeout' => 20));
+        if (empty($home['error']) && (int) $home['status_code'] === 200 && self::content_type_matches($home['content_type'], array('text/html'))) {
+            $source_map['homepage_links'] = self::extract_internal_links_from_html($home['body'], home_url('/'), $host, $max_urls * 3);
+        }
+
+        $union = array();
+        foreach ($source_map as $src => $urls) {
+            foreach ((array) $urls as $url) {
+                $key = self::normalize_comparable_url($url);
+                if ($key === '') {
+                    continue;
+                }
+                if (!isset($union[$key])) {
+                    $union[$key] = array(
+                        'url' => $url,
+                        'sources' => array(),
+                    );
+                }
+                $union[$key]['sources'][$src] = true;
+            }
+        }
+
+        $home_url = trailingslashit(home_url('/'));
+        $home_key = self::normalize_comparable_url($home_url);
+        if ($home_key !== '' && !isset($union[$home_key])) {
+            $union[$home_key] = array(
+                'url' => $home_url,
+                'sources' => array('seed' => true),
+            );
+        }
+
+        $items = array();
+        foreach ($union as $entry) {
+            $url = isset($entry['url']) ? (string) $entry['url'] : '';
+            if ($url === '') {
+                continue;
+            }
+            $items[] = array(
+                'url' => $url,
+                'group' => self::classify_index_group_for_url($url, $base_url),
+                'sources' => array_keys(isset($entry['sources']) && is_array($entry['sources']) ? $entry['sources'] : array()),
+            );
+        }
+
+        usort($items, array(__CLASS__, 'sort_index_pool_items'));
+        if (count($items) > $max_urls) {
+            $items = array_slice($items, 0, $max_urls);
+        }
+
+        $group_counts = array();
+        foreach ($items as $row) {
+            $group = isset($row['group']) ? (string) $row['group'] : 'other';
+            $group_counts[$group] = (int) (isset($group_counts[$group]) ? $group_counts[$group] : 0) + 1;
+        }
+
+        $report = array(
+            'time' => current_time('mysql'),
+            'trigger' => $trigger,
+            'meta' => array(
+                'target' => $base_url,
+                'target_domain' => $host,
+                'generated_at' => current_time('mysql'),
+            ),
+            'summary' => array(
+                'urls_total' => count($items),
+                'source_counts' => array(
+                    'sitemap' => count($source_map['sitemap']),
+                    'llms' => count($source_map['llms']),
+                    'homepage_links' => count($source_map['homepage_links']),
+                ),
+                'groups' => $group_counts,
+            ),
+            'urls' => $items,
+        );
+
+        if ($persist) {
+            $state = get_option(self::INDEX_OPTION_KEY, array());
+            if (!is_array($state)) {
+                $state = array();
+            }
+            $state['discover'] = $report;
+            $state['time'] = $report['time'];
+            update_option(self::INDEX_OPTION_KEY, $state, false);
+            self::log_event('info', 'index_discover_completed', array('urls_total' => (int) $report['summary']['urls_total']));
+        }
+
+        return $report;
+    }
+
+    private static function run_index_track_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $index_state = get_option(self::INDEX_OPTION_KEY, array());
+        if (!is_array($index_state)) {
+            $index_state = array();
+        }
+
+        $discover = isset($index_state['discover']) && is_array($index_state['discover']) ? $index_state['discover'] : array();
+        if (empty($discover['urls'])) {
+            $discover = self::run_index_discover_pipeline($persist, $trigger . '-discover');
+        }
+
+        $pool = isset($discover['urls']) && is_array($discover['urls']) ? $discover['urls'] : array();
+        $max_urls = max(20, min(1000, (int) (isset($settings['index_max_urls']) ? $settings['index_max_urls'] : 220)));
+        $pool = array_slice($pool, 0, $max_urls);
+
+        $previous_track = isset($index_state['track']) && is_array($index_state['track']) ? $index_state['track'] : array();
+        $previous_records = self::index_records_by_key(isset($previous_track['records']) && is_array($previous_track['records']) ? $previous_track['records'] : array());
+
+        $current_records = array();
+        foreach ($pool as $item) {
+            $url = isset($item['url']) ? (string) $item['url'] : '';
+            if ($url === '') {
+                continue;
+            }
+            $group = isset($item['group']) ? (string) $item['group'] : 'other';
+            $current_records[] = self::probe_index_status_for_url($url, $group, $settings);
+        }
+
+        $merged = self::merge_index_track_records($current_records, $previous_records);
+        $changes = self::compute_index_track_changes($merged, $previous_records, (int) (isset($settings['index_long_unindexed_days']) ? $settings['index_long_unindexed_days'] : 14));
+        $summary = self::summarize_index_track_records($merged);
+
+        $report = array(
+            'time' => current_time('mysql'),
+            'trigger' => $trigger,
+            'meta' => array(
+                'target' => home_url('/'),
+                'target_domain' => self::normalize_domain_value(home_url('/')),
+                'generated_at' => current_time('mysql'),
+            ),
+            'summary' => $summary,
+            'changes' => $changes,
+            'records' => $merged,
+        );
+
+        if ($persist) {
+            $index_state['track'] = $report;
+            $index_state['time'] = $report['time'];
+            update_option(self::INDEX_OPTION_KEY, $index_state, false);
+            self::append_history_option(
+                self::INDEX_HISTORY_OPTION_KEY,
+                array(
+                    'time' => $report['time'],
+                    'trigger' => $trigger,
+                    'summary' => $report['summary'],
+                    'changes' => $report['changes'],
+                    'records' => $report['records'],
+                )
+            );
+            self::log_event('info', 'index_track_completed', array(
+                'total' => (int) (isset($summary['total']) ? $summary['total'] : 0),
+                'indexed' => (int) (isset($summary['indexed']) ? $summary['indexed'] : 0),
+                'not_indexed' => (int) (isset($summary['not_indexed']) ? $summary['not_indexed'] : 0),
+            ));
+        }
+
+        return $report;
+    }
+
+    private static function run_index_submit_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $index_state = get_option(self::INDEX_OPTION_KEY, array());
+        if (!is_array($index_state)) {
+            $index_state = array();
+        }
+        $track = isset($index_state['track']) && is_array($index_state['track']) ? $index_state['track'] : array();
+        if (empty($track['records'])) {
+            $track = self::run_index_track_pipeline($persist, $trigger . '-track');
+        }
+
+        $records = isset($track['records']) && is_array($track['records']) ? $track['records'] : array();
+        $status_filter = self::parse_index_status_filter(isset($settings['index_submit_status_filter']) ? $settings['index_submit_status_filter'] : 'not_indexed,unknown');
+        $provider = self::sanitize_index_submit_provider(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook');
+
+        $items = array();
+        $submitted = 0;
+        $skipped = 0;
+        $failed = 0;
+        foreach ($records as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $status = isset($row['status']) ? strtolower((string) $row['status']) : 'unknown';
+            if (!in_array($status, $status_filter, true)) {
+                continue;
+            }
+
+            $url = isset($row['url']) ? (string) $row['url'] : '';
+            if ($url === '') {
+                continue;
+            }
+            $entry = array(
+                'url' => $url,
+                'group' => isset($row['group']) ? (string) $row['group'] : 'other',
+                'provider' => $provider,
+            );
+
+            if ($provider === 'dry-run') {
+                $entry['status'] = 'submitted';
+                $entry['detail'] = 'dry-run';
+                $submitted++;
+                $items[] = $entry;
+                continue;
+            }
+
+            if ($provider === 'google-indexing') {
+                if (empty($settings['index_allow_unsupported_google_types']) && !self::is_google_indexing_supported_url($url)) {
+                    $entry['status'] = 'skipped';
+                    $entry['detail'] = 'unsupported_for_google_indexing_api';
+                    $skipped++;
+                    $items[] = $entry;
+                    continue;
+                }
+                $submit = self::submit_to_google_indexing_api($url, isset($settings['index_google_token']) ? (string) $settings['index_google_token'] : '');
+                $entry['status'] = !empty($submit['ok']) ? 'submitted' : 'failed';
+                $entry['detail'] = isset($submit['detail']) ? (string) $submit['detail'] : '';
+                if (!empty($submit['ok'])) {
+                    $submitted++;
+                } else {
+                    $failed++;
+                }
+                $items[] = $entry;
+                continue;
+            }
+
+            if ($provider === 'webhook') {
+                $hook = self::post_json_webhook(
+                    isset($settings['index_webhook_url']) ? (string) $settings['index_webhook_url'] : '',
+                    isset($settings['index_webhook_token']) ? (string) $settings['index_webhook_token'] : '',
+                    array(
+                        'event' => 'geo_index_submit',
+                        'target_domain' => self::normalize_domain_value(home_url('/')),
+                        'url' => $url,
+                        'type' => 'URL_UPDATED',
+                    ),
+                    20
+                );
+                $entry['status'] = !empty($hook['ok']) ? 'submitted' : 'failed';
+                $entry['detail'] = isset($hook['detail']) ? (string) $hook['detail'] : '';
+                if (!empty($hook['ok'])) {
+                    $submitted++;
+                } else {
+                    $failed++;
+                }
+                $items[] = $entry;
+                continue;
+            }
+
+            $cmd = self::run_command_provider(
+                isset($settings['index_command_template']) ? (string) $settings['index_command_template'] : '',
+                array(
+                    'url' => $url,
+                    'type' => 'URL_UPDATED',
+                    'provider' => $provider,
+                    'target_domain' => self::normalize_domain_value(home_url('/')),
+                )
+            );
+            $entry['status'] = !empty($cmd['ok']) ? 'submitted' : 'failed';
+            $entry['detail'] = isset($cmd['detail']) ? (string) $cmd['detail'] : '';
+            if (!empty($cmd['ok'])) {
+                $submitted++;
+            } else {
+                $failed++;
+            }
+            $items[] = $entry;
+        }
+
+        $report = array(
+            'time' => current_time('mysql'),
+            'trigger' => $trigger,
+            'meta' => array(
+                'target' => home_url('/'),
+                'target_domain' => self::normalize_domain_value(home_url('/')),
+                'generated_at' => current_time('mysql'),
+                'provider' => $provider,
+            ),
+            'summary' => array(
+                'total' => count($items),
+                'submitted' => $submitted,
+                'skipped' => $skipped,
+                'failed' => $failed,
+            ),
+            'items' => $items,
+        );
+
+        if ($persist) {
+            $index_state['submit_last'] = $report;
+            $index_state['time'] = $report['time'];
+            update_option(self::INDEX_OPTION_KEY, $index_state, false);
+            self::append_history_option(
+                self::INDEX_SUBMIT_HISTORY_OPTION_KEY,
+                array(
+                    'time' => $report['time'],
+                    'trigger' => $trigger,
+                    'summary' => $report['summary'],
+                    'provider' => $provider,
+                )
+            );
+            self::log_event('info', 'index_submit_completed', $report['summary']);
+        }
+
+        return $report;
+    }
+
+    private static function run_index_audit_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $index_state = get_option(self::INDEX_OPTION_KEY, array());
+        if (!is_array($index_state)) {
+            $index_state = array();
+        }
+        $track = isset($index_state['track']) && is_array($index_state['track']) ? $index_state['track'] : array();
+        if (empty($track['records'])) {
+            $track = self::run_index_track_pipeline($persist, $trigger . '-track');
+        }
+
+        $records = isset($track['records']) && is_array($track['records']) ? $track['records'] : array();
+        $pool = array();
+        foreach ($records as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $status = isset($row['status']) ? (string) $row['status'] : 'unknown';
+            if (!in_array($status, array('not_indexed', 'unknown'), true)) {
+                continue;
+            }
+            $pool[] = array(
+                'url' => isset($row['url']) ? (string) $row['url'] : '',
+                'group' => isset($row['group']) ? (string) $row['group'] : 'other',
+            );
+        }
+
+        if (empty($pool)) {
+            foreach ($records as $row) {
+                if (is_array($row) && !empty($row['url'])) {
+                    $pool[] = array(
+                        'url' => (string) $row['url'],
+                        'group' => isset($row['group']) ? (string) $row['group'] : 'other',
+                    );
+                }
+            }
+        }
+
+        $home = self::fetch_url(home_url('/'), array('limit_response_size' => 1200000));
+        $homepage_body = empty($home['error']) && (int) $home['status_code'] === 200 ? strtolower((string) $home['body']) : '';
+        $llms_url_set = self::get_llms_url_compare_set();
+        $thin_threshold = max(120, min(4000, (int) (isset($settings['index_thin_threshold_chars']) ? $settings['index_thin_threshold_chars'] : 380)));
+
+        $audit_records = array();
+        $issue_counter = array();
+        $pass = 0;
+        $warn = 0;
+        $fail = 0;
+        $p0 = 0;
+        $p1 = 0;
+        $p2 = 0;
+
+        foreach ($pool as $item) {
+            $url = isset($item['url']) ? (string) $item['url'] : '';
+            if ($url === '') {
+                continue;
+            }
+
+            $record = self::audit_index_url_entry($url, isset($item['group']) ? (string) $item['group'] : 'other', $thin_threshold, $homepage_body, $llms_url_set);
+            $audit_records[] = $record;
+
+            $status = isset($record['status']) ? (string) $record['status'] : 'pass';
+            if ($status === 'fail') {
+                $fail++;
+            } elseif ($status === 'warn') {
+                $warn++;
+            } else {
+                $pass++;
+            }
+
+            $priority = isset($record['max_priority']) ? (string) $record['max_priority'] : 'PASS';
+            if ($priority === 'P0') {
+                $p0++;
+            } elseif ($priority === 'P1') {
+                $p1++;
+            } elseif ($priority === 'P2') {
+                $p2++;
+            }
+
+            $issues = isset($record['issues']) && is_array($record['issues']) ? $record['issues'] : array();
+            foreach ($issues as $issue) {
+                if (!is_array($issue) || empty($issue['code'])) {
+                    continue;
+                }
+                $code = (string) $issue['code'];
+                if (!isset($issue_counter[$code])) {
+                    $issue_counter[$code] = array(
+                        'code' => $code,
+                        'priority' => isset($issue['priority']) ? (string) $issue['priority'] : '',
+                        'count' => 0,
+                        'fix' => isset($issue['fix']) ? (string) $issue['fix'] : '',
+                    );
+                }
+                $issue_counter[$code]['count']++;
+            }
+        }
+
+        $issues_summary = array_values($issue_counter);
+        usort($issues_summary, array(__CLASS__, 'sort_index_issue_summary'));
+
+        $report = array(
+            'time' => current_time('mysql'),
+            'trigger' => $trigger,
+            'meta' => array(
+                'target' => home_url('/'),
+                'target_domain' => self::normalize_domain_value(home_url('/')),
+                'generated_at' => current_time('mysql'),
+            ),
+            'summary' => array(
+                'total' => count($audit_records),
+                'pass' => $pass,
+                'warn' => $warn,
+                'fail' => $fail,
+                'p0' => $p0,
+                'p1' => $p1,
+                'p2' => $p2,
+            ),
+            'issues_summary' => $issues_summary,
+            'records' => $audit_records,
+        );
+
+        if ($persist) {
+            $index_state['audit'] = $report;
+            $index_state['time'] = $report['time'];
+            update_option(self::INDEX_OPTION_KEY, $index_state, false);
+            self::log_event('info', 'index_audit_completed', $report['summary']);
+        }
+
+        return $report;
+    }
+
+    private static function run_index_report_pipeline($persist = true, $trigger = 'manual') {
+        $settings = self::get_settings();
+        $days = max(7, min(365, (int) (isset($settings['index_report_days']) ? $settings['index_report_days'] : 30)));
+        $history = self::get_history_option(self::INDEX_HISTORY_OPTION_KEY);
+        $now_ts = time();
+        $cutoff = $now_ts - ($days * DAY_IN_SECONDS);
+
+        $selected = array();
+        foreach ($history as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $entry_time = isset($entry['time']) ? (string) $entry['time'] : '';
+            $ts = self::safe_parse_time($entry_time);
+            if ($ts === null || $ts < $cutoff) {
+                continue;
+            }
+            $entry['_ts'] = $ts;
+            $selected[] = $entry;
+        }
+
+        usort($selected, array(__CLASS__, 'sort_history_by_ts_asc'));
+
+        if (empty($selected)) {
+            $track = self::run_index_track_pipeline($persist, $trigger . '-track');
+            $selected[] = array(
+                'time' => current_time('mysql'),
+                'summary' => isset($track['summary']) ? $track['summary'] : array(),
+                'changes' => isset($track['changes']) ? $track['changes'] : array(),
+                'records' => isset($track['records']) ? $track['records'] : array(),
+                '_ts' => time(),
+            );
+        }
+
+        $latest = end($selected);
+        if (!is_array($latest)) {
+            $latest = array();
+        }
+        $latest_records = isset($latest['records']) && is_array($latest['records']) ? $latest['records'] : array();
+        $latest_changes = isset($latest['changes']) && is_array($latest['changes']) ? $latest['changes'] : array();
+
+        $trend = array();
+        $deindex_events = 0;
+        $indexed_exposure = 0;
+        for ($i = 0; $i < count($selected); $i++) {
+            $snap = $selected[$i];
+            $summary = isset($snap['summary']) && is_array($snap['summary']) ? $snap['summary'] : array();
+            $changes = isset($snap['changes']) && is_array($snap['changes']) ? $snap['changes'] : array();
+            $trend[] = array(
+                'generated_at' => isset($snap['time']) ? $snap['time'] : '',
+                'index_rate_pct' => (float) (isset($summary['index_rate_pct']) ? $summary['index_rate_pct'] : 0),
+                'indexed' => (int) (isset($summary['indexed']) ? $summary['indexed'] : 0),
+                'total' => (int) (isset($summary['total']) ? $summary['total'] : 0),
+                'newly_indexed' => count(isset($changes['newly_indexed']) && is_array($changes['newly_indexed']) ? $changes['newly_indexed'] : array()),
+                'dropped_indexed' => count(isset($changes['dropped_indexed']) && is_array($changes['dropped_indexed']) ? $changes['dropped_indexed'] : array()),
+            );
+
+            if ($i < 1) {
+                continue;
+            }
+            $prev_indexed = self::index_indexed_url_set(isset($selected[$i - 1]['records']) && is_array($selected[$i - 1]['records']) ? $selected[$i - 1]['records'] : array());
+            $cur_indexed = self::index_indexed_url_set(isset($snap['records']) && is_array($snap['records']) ? $snap['records'] : array());
+            $indexed_exposure += count($prev_indexed);
+            $deindex_events += count(array_diff($prev_indexed, $cur_indexed));
+        }
+
+        $latency_days = array();
+        $recovered = 0;
+        $recovery_base = 0;
+        $group_stats = array();
+        $long_unindexed = array();
+        foreach ($latest_records as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $status = isset($row['status']) ? (string) $row['status'] : 'unknown';
+            $group = isset($row['group']) ? (string) $row['group'] : 'other';
+            if (!isset($group_stats[$group])) {
+                $group_stats[$group] = array('indexed' => 0, 'total' => 0);
+            }
+            $group_stats[$group]['total']++;
+            if ($status === 'indexed') {
+                $group_stats[$group]['indexed']++;
+            }
+
+            $first_seen_ts = self::safe_parse_time(isset($row['first_seen_utc']) ? $row['first_seen_utc'] : '');
+            $first_indexed_ts = self::safe_parse_time(isset($row['first_indexed_utc']) ? $row['first_indexed_utc'] : '');
+            if ($first_seen_ts !== null && $first_indexed_ts !== null && $first_indexed_ts >= $first_seen_ts) {
+                $latency_days[] = ($first_indexed_ts - $first_seen_ts) / DAY_IN_SECONDS;
+            }
+
+            $first_not_idx_ts = self::safe_parse_time(isset($row['first_not_indexed_utc']) ? $row['first_not_indexed_utc'] : '');
+            if ($first_not_idx_ts !== null) {
+                $recovery_base++;
+                if ($status === 'indexed') {
+                    $recovered++;
+                }
+                $age_days = ($now_ts - $first_not_idx_ts) / DAY_IN_SECONDS;
+                if ($status === 'not_indexed' && $age_days >= 14) {
+                    $long_unindexed[] = array(
+                        'url' => isset($row['url']) ? (string) $row['url'] : '',
+                        'group' => $group,
+                        'age_days' => round($age_days, 2),
+                    );
+                }
+            }
+        }
+
+        $template_performance = array();
+        ksort($group_stats);
+        foreach ($group_stats as $group => $stat) {
+            $total = (int) (isset($stat['total']) ? $stat['total'] : 0);
+            $indexed = (int) (isset($stat['indexed']) ? $stat['indexed'] : 0);
+            $template_performance[] = array(
+                'group' => $group,
+                'indexed' => $indexed,
+                'total' => $total,
+                'index_rate_pct' => round(($indexed / max(1, $total)) * 100, 2),
+            );
+        }
+
+        usort($long_unindexed, array(__CLASS__, 'sort_long_unindexed_desc'));
+        $avg_indexing_days = empty($latency_days) ? 0 : round(array_sum($latency_days) / max(1, count($latency_days)), 2);
+        $deindex_rate_pct = round(($deindex_events / max(1, $indexed_exposure)) * 100, 2);
+        $recovery_rate_pct = round(($recovered / max(1, $recovery_base)) * 100, 2);
+
+        $report = array(
+            'time' => current_time('mysql'),
+            'trigger' => $trigger,
+            'meta' => array(
+                'target' => home_url('/'),
+                'target_domain' => self::normalize_domain_value(home_url('/')),
+                'generated_at' => current_time('mysql'),
+                'window_days' => $days,
+                'snapshots' => count($selected),
+            ),
+            'summary' => array(
+                'current_index_rate_pct' => (float) (isset($latest['summary']['index_rate_pct']) ? $latest['summary']['index_rate_pct'] : 0),
+                'avg_indexing_days' => $avg_indexing_days,
+                'deindex_rate_pct' => $deindex_rate_pct,
+                'recovery_rate_pct' => $recovery_rate_pct,
+            ),
+            'template_performance' => $template_performance,
+            'trend' => $trend,
+            'focus_lists' => array(
+                'newly_indexed' => isset($latest_changes['newly_indexed']) && is_array($latest_changes['newly_indexed']) ? array_slice($latest_changes['newly_indexed'], 0, 40) : array(),
+                'dropped_indexed' => isset($latest_changes['dropped_indexed']) && is_array($latest_changes['dropped_indexed']) ? array_slice($latest_changes['dropped_indexed'], 0, 40) : array(),
+                'long_unindexed' => array_slice($long_unindexed, 0, 40),
+            ),
+        );
+
+        if ($persist) {
+            $index_state = get_option(self::INDEX_OPTION_KEY, array());
+            if (!is_array($index_state)) {
+                $index_state = array();
+            }
+            $index_state['report'] = $report;
+            $index_state['time'] = $report['time'];
+            update_option(self::INDEX_OPTION_KEY, $index_state, false);
+            self::log_event('info', 'index_report_completed', $report['summary']);
+        }
+
+        return $report;
+    }
+
+    private static function normalize_domain_value($value) {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return '';
+        }
+
+        $candidate = $value;
+        if (!preg_match('#^https?://#i', $candidate)) {
+            $candidate = 'https://' . ltrim($candidate, '/');
+        }
+
+        $host = wp_parse_url($candidate, PHP_URL_HOST);
+        if (!is_string($host) || $host === '') {
+            $host = wp_parse_url('https://' . $value, PHP_URL_HOST);
+        }
+        if (!is_string($host) || $host === '') {
+            return '';
+        }
+
+        $host = strtolower(trim($host));
+        $host = preg_replace('/:\d+$/', '', $host);
+        if (strpos($host, 'www.') === 0) {
+            $host = substr($host, 4);
+        }
+
+        if (!preg_match('/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/', $host)) {
+            return '';
+        }
+
+        return $host;
+    }
+
+    private static function parse_monitor_competitors($raw, $target_domain) {
+        $items = preg_split('/[\n,]+/', str_replace("\r", "\n", (string) $raw));
+        $domains = array();
+        foreach ((array) $items as $item) {
+            $domain = self::normalize_domain_value($item);
+            if ($domain === '' || $domain === $target_domain || in_array($domain, $domains, true)) {
+                continue;
+            }
+            $domains[] = $domain;
+        }
+        return $domains;
+    }
+
+    private static function parse_monitor_keywords($raw, $max_keywords, $target_domain) {
+        $lines = preg_split('/\n+/', str_replace("\r", "\n", (string) $raw));
+        $keywords = array();
+        $seen = array();
+        $brand_tokens = self::build_brand_tokens($target_domain);
+
+        foreach ((array) $lines as $line) {
+            $line = trim((string) $line);
+            if ($line === '' || strpos($line, '#') === 0) {
+                continue;
+            }
+
+            $line = str_replace("\t", ',', $line);
+            $cols = str_getcsv($line);
+            $keyword = isset($cols[0]) ? trim((string) $cols[0]) : '';
+            if ($keyword === '') {
+                continue;
+            }
+            $key = strtolower($keyword);
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $group = isset($cols[1]) && trim((string) $cols[1]) !== '' ? sanitize_text_field(trim((string) $cols[1])) : 'default';
+            $value = isset($cols[2]) ? (float) $cols[2] : 1.0;
+            if ($value <= 0) {
+                $value = 1.0;
+            }
+
+            $keywords[] = array(
+                'keyword' => $keyword,
+                'group' => $group,
+                'value' => $value,
+                'is_brand' => self::is_brand_keyword_for_monitor($keyword, $brand_tokens),
+            );
+            $seen[$key] = true;
+
+            if (count($keywords) >= $max_keywords) {
+                break;
+            }
+        }
+
+        if (!empty($keywords)) {
+            return $keywords;
+        }
+
+        return self::get_monitor_fallback_keywords($max_keywords, $target_domain);
+    }
+
+    private static function get_monitor_fallback_keywords($max_keywords, $target_domain) {
+        $keywords = array();
+        $seen = array();
+        $brand_tokens = self::build_brand_tokens($target_domain);
+
+        $posts = get_posts(array(
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'posts_per_page' => max(10, min(120, (int) $max_keywords)),
+            'orderby' => 'date',
+            'order' => 'DESC',
+            'no_found_rows' => true,
+        ));
+
+        foreach ($posts as $post) {
+            if (!($post instanceof WP_Post)) {
+                continue;
+            }
+
+            $title = trim(wp_strip_all_tags(get_the_title($post), true));
+            if ($title !== '') {
+                $key = strtolower($title);
+                if (!isset($seen[$key])) {
+                    $keywords[] = array(
+                        'keyword' => $title,
+                        'group' => 'content',
+                        'value' => 1.0,
+                        'is_brand' => self::is_brand_keyword_for_monitor($title, $brand_tokens),
+                    );
+                    $seen[$key] = true;
+                }
+            }
+
+            $terms = get_the_terms($post, 'category');
+            if (is_array($terms)) {
+                foreach ($terms as $term) {
+                    if (!$term instanceof WP_Term) {
+                        continue;
+                    }
+                    $name = trim((string) $term->name);
+                    if ($name === '') {
+                        continue;
+                    }
+                    $key = strtolower($name);
+                    if (isset($seen[$key])) {
+                        continue;
+                    }
+                    $keywords[] = array(
+                        'keyword' => $name,
+                        'group' => 'category',
+                        'value' => 0.8,
+                        'is_brand' => self::is_brand_keyword_for_monitor($name, $brand_tokens),
+                    );
+                    $seen[$key] = true;
+                    if (count($keywords) >= $max_keywords) {
+                        break;
+                    }
+                }
+            }
+
+            if (count($keywords) >= $max_keywords) {
+                break;
+            }
+        }
+
+        if (empty($keywords)) {
+            $fallback = get_bloginfo('name');
+            $keywords[] = array(
+                'keyword' => $fallback !== '' ? $fallback : self::normalize_domain_value(home_url('/')),
+                'group' => 'brand',
+                'value' => 1.0,
+                'is_brand' => true,
+            );
+        }
+
+        return array_slice($keywords, 0, $max_keywords);
+    }
+
+    private static function build_brand_tokens($target_domain) {
+        $tokens = array();
+        $target_domain = strtolower((string) $target_domain);
+        if ($target_domain !== '') {
+            $left = explode('.', $target_domain);
+            $root = isset($left[0]) ? $left[0] : $target_domain;
+            foreach (preg_split('/[-_.]+/', $root) as $part) {
+                $part = strtolower(trim((string) $part));
+                if ($part !== '' && strlen($part) >= 2) {
+                    $tokens[$part] = true;
+                }
+            }
+        }
+
+        $site_name = strtolower((string) get_bloginfo('name'));
+        foreach (preg_split('/[\s\-_.]+/', $site_name) as $part) {
+            $part = trim((string) $part);
+            if ($part !== '' && strlen($part) >= 2) {
+                $tokens[$part] = true;
+            }
+        }
+
+        return array_keys($tokens);
+    }
+
+    private static function is_brand_keyword_for_monitor($keyword, array $tokens) {
+        $keyword_l = strtolower((string) $keyword);
+        foreach ($tokens as $token) {
+            $token = strtolower((string) $token);
+            if ($token !== '' && strpos($keyword_l, $token) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function get_monitor_weights(array $settings) {
+        $weights = array(
+            'keyword_overlap' => max(0, (float) (isset($settings['monitor_weight_keyword_overlap']) ? $settings['monitor_weight_keyword_overlap'] : 45)),
+            'serp_coappear' => max(0, (float) (isset($settings['monitor_weight_serp_coappear']) ? $settings['monitor_weight_serp_coappear'] : 35)),
+            'rank_pressure' => max(0, (float) (isset($settings['monitor_weight_rank_pressure']) ? $settings['monitor_weight_rank_pressure'] : 20)),
+        );
+        $sum = array_sum($weights);
+        if ($sum <= 0) {
+            return array(
+                'keyword_overlap' => 0.45,
+                'serp_coappear' => 0.35,
+                'rank_pressure' => 0.20,
+            );
+        }
+        foreach ($weights as $key => $value) {
+            $weights[$key] = round($value / $sum, 4);
+        }
+        return $weights;
+    }
+
+    private static function fetch_bing_results_for_keyword($keyword, $depth) {
+        $depth = max(5, min(50, (int) $depth));
+        $url = 'https://www.bing.com/search?q=' . rawurlencode((string) $keyword) . '&count=' . $depth;
+        $response = self::fetch_url($url, array(
+            'timeout' => 20,
+            'limit_response_size' => 2000000,
+            'user_agent' => 'geo-llms-toolkit/wp-plugin (+https://github.com/aronhy/geo-llms-toolkit)',
+        ));
+
+        if (!empty($response['error']) || (int) $response['status_code'] !== 200 || !self::content_type_matches($response['content_type'], array('text/html'))) {
+            return array(
+                'domains' => array(),
+                'rank_by_domain' => array(),
+                'urls' => array(),
+            );
+        }
+
+        $urls = self::extract_bing_result_links($response['body'], $depth);
+        $domains = array();
+        $rank_by_domain = array();
+        foreach ($urls as $idx => $result_url) {
+            $domain = self::normalize_domain_value($result_url);
+            if ($domain === '' || self::should_skip_serp_domain($domain)) {
+                continue;
+            }
+            if (!isset($rank_by_domain[$domain])) {
+                $rank_by_domain[$domain] = $idx + 1;
+                $domains[] = $domain;
+            }
+        }
+
+        return array(
+            'domains' => array_slice($domains, 0, $depth),
+            'rank_by_domain' => $rank_by_domain,
+            'urls' => array_slice($urls, 0, $depth),
+        );
+    }
+
+    private static function extract_bing_result_links($html, $depth) {
+        $links = array();
+        $depth = max(5, min(50, (int) $depth));
+
+        if (preg_match_all('/<li[^>]*class=["\'][^"\']*b_algo[^"\']*["\'][^>]*>.*?<a[^>]+href=["\']([^"\']+)["\']/is', (string) $html, $matches)) {
+            foreach ($matches[1] as $url) {
+                $url = html_entity_decode(trim((string) $url), ENT_QUOTES, 'UTF-8');
+                if (!preg_match('#^https?://#i', $url)) {
+                    continue;
+                }
+                if (!in_array($url, $links, true)) {
+                    $links[] = $url;
+                }
+                if (count($links) >= $depth) {
+                    break;
+                }
+            }
+        }
+
+        if (count($links) >= $depth) {
+            return $links;
+        }
+
+        if (preg_match_all('/<a[^>]+href=["\'](https?:\/\/[^"\']+)["\']/i', (string) $html, $matches)) {
+            foreach ($matches[1] as $url) {
+                $url = html_entity_decode(trim((string) $url), ENT_QUOTES, 'UTF-8');
+                if (!in_array($url, $links, true)) {
+                    $links[] = $url;
+                }
+                if (count($links) >= $depth) {
+                    break;
+                }
+            }
+        }
+
+        return $links;
+    }
+
+    private static function should_skip_serp_domain($domain) {
+        foreach (array('bing.com', 'google.com', 'microsoft.com', 'msn.com') as $blocked) {
+            if ($domain === $blocked || substr($domain, -strlen('.' . $blocked)) === '.' . $blocked) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function percentile_value(array $values, $pct) {
+        $clean = array();
+        foreach ($values as $value) {
+            $clean[] = (float) $value;
+        }
+        if (empty($clean)) {
+            return 0.0;
+        }
+        sort($clean, SORT_NUMERIC);
+        if (count($clean) === 1) {
+            return (float) $clean[0];
+        }
+
+        $position = (count($clean) - 1) * (float) $pct;
+        $low = (int) floor($position);
+        $high = (int) ceil($position);
+        $frac = $position - $low;
+
+        if ($high <= $low) {
+            return (float) $clean[$low];
+        }
+
+        return ((float) $clean[$low] * (1 - $frac)) + ((float) $clean[$high] * $frac);
+    }
+
+    private static function classify_competitor_tier($score, $p50, $p80) {
+        $score = (float) $score;
+        if ($score <= 0) {
+            return 'peripheral';
+        }
+        if ($score >= (float) $p80) {
+            return 'direct';
+        }
+        if ($score >= (float) $p50) {
+            return 'potential';
+        }
+        return 'peripheral';
+    }
+
+    private static function calc_priority($impact, $effort) {
+        $impact = (float) $impact;
+        $effort = (float) $effort;
+        $score = ($impact * 0.65) + ((100 - $effort) * 0.35);
+        if ($score >= 75) {
+            $priority = 'P0';
+        } elseif ($score >= 55) {
+            $priority = 'P1';
+        } else {
+            $priority = 'P2';
+        }
+        return array($priority, round($score, 2));
+    }
+
+    private static function build_monitor_competitor_profiles(array $rows, array $competitors, $keyword_hits_target, $serp_depth, array $weights) {
+        $total_keywords = count($rows);
+        $brand_keywords = 0;
+        foreach ($rows as $row) {
+            if (!empty($row['is_brand'])) {
+                $brand_keywords++;
+            }
+        }
+        $non_brand_keywords = max(0, $total_keywords - $brand_keywords);
+
+        $profiles = array();
+        foreach ($competitors as $comp) {
+            $matched = 0;
+            $matched_brand = 0;
+            $matched_non_brand = 0;
+            $coappear = 0;
+            $weighted_presence = 0.0;
+            $rank_gaps = array();
+            $avg_rank_sum = 0.0;
+
+            foreach ($rows as $row) {
+                $rank_map = isset($row['rank_by_domain']) && is_array($row['rank_by_domain']) ? $row['rank_by_domain'] : array();
+                $comp_rank = isset($rank_map[$comp]) ? (int) $rank_map[$comp] : 0;
+                if ($comp_rank <= 0) {
+                    continue;
+                }
+
+                $matched++;
+                $avg_rank_sum += $comp_rank;
+                $weighted_presence += (float) (isset($row['value']) ? $row['value'] : 1.0);
+                if (!empty($row['is_brand'])) {
+                    $matched_brand++;
+                } else {
+                    $matched_non_brand++;
+                }
+
+                $target_rank = (int) (isset($row['target_rank']) ? $row['target_rank'] : 0);
+                if ($target_rank > 0) {
+                    $coappear++;
+                    $gap = $target_rank - $comp_rank;
+                    if ($gap > 0) {
+                        $rank_gaps[] = (float) $gap;
+                    }
+                }
+            }
+
+            $keyword_overlap = $total_keywords > 0 ? ($matched / $total_keywords) * 100 : 0;
+            $serp_coappear = $keyword_hits_target > 0 ? ($coappear / $keyword_hits_target) * 100 : 0;
+            $avg_rank_gap = !empty($rank_gaps) ? array_sum($rank_gaps) / count($rank_gaps) : 0;
+            $rank_pressure = min(100, ($avg_rank_gap / max(1, (float) $serp_depth)) * 100);
+            $non_brand_share = $non_brand_keywords > 0 ? ($matched_non_brand / $non_brand_keywords) * 100 : 0;
+            $brand_share = $brand_keywords > 0 ? ($matched_brand / $brand_keywords) * 100 : 0;
+
+            $score = ($keyword_overlap * (float) $weights['keyword_overlap'])
+                + ($serp_coappear * (float) $weights['serp_coappear'])
+                + ($rank_pressure * (float) $weights['rank_pressure']);
+            $data_coverage = ($matched / max(1, $total_keywords)) * 100;
+            $confidence = min(100, round($data_coverage, 2));
+
+            $profiles[] = array(
+                'domain' => $comp,
+                'score' => round($score, 2),
+                'confidence_pct' => $confidence,
+                'keyword_overlap_pct' => round($keyword_overlap, 2),
+                'serp_coappear_pct' => round($serp_coappear, 2),
+                'rank_pressure_pct' => round($rank_pressure, 2),
+                'brand_share_pct' => round($brand_share, 2),
+                'non_brand_share_pct' => round($non_brand_share, 2),
+                'matched_keywords' => $matched,
+                'average_rank' => $matched > 0 ? round($avg_rank_sum / $matched, 2) : 0,
+                'weighted_presence' => round($weighted_presence, 2),
+            );
+        }
+
+        $scores = array();
+        foreach ($profiles as $profile) {
+            $scores[] = (float) $profile['score'];
+        }
+        $p50 = self::percentile_value($scores, 0.5);
+        $p80 = self::percentile_value($scores, 0.8);
+
+        foreach ($profiles as $idx => $profile) {
+            $profiles[$idx]['tier'] = self::classify_competitor_tier(isset($profile['score']) ? (float) $profile['score'] : 0, $p50, $p80);
+        }
+
+        usort($profiles, function ($a, $b) {
+            return (float) (isset($b['score']) ? $b['score'] : 0) <=> (float) (isset($a['score']) ? $a['score'] : 0);
+        });
+
+        return $profiles;
+    }
+
+    private static function build_monitor_priority_actions(array $rows, array $profiles, $serp_depth) {
+        $tracked_domains = array();
+        foreach ($profiles as $profile) {
+            if (!is_array($profile)) {
+                continue;
+            }
+            $tier = isset($profile['tier']) ? (string) $profile['tier'] : '';
+            if ($tier === 'direct' || $tier === 'potential') {
+                $tracked_domains[] = isset($profile['domain']) ? (string) $profile['domain'] : '';
+            }
+        }
+        $tracked_domains = array_values(array_filter(array_unique($tracked_domains)));
+
+        $actions = array();
+        foreach ($rows as $row) {
+            if (!empty($row['is_brand'])) {
+                continue;
+            }
+
+            $target_rank = (int) (isset($row['target_rank']) ? $row['target_rank'] : 0);
+            $best_comp_domain = '';
+            $best_comp_rank = 0;
+            $hit_count = 0;
+            $rank_map = isset($row['rank_by_domain']) && is_array($row['rank_by_domain']) ? $row['rank_by_domain'] : array();
+            foreach ($tracked_domains as $domain) {
+                $comp_rank = isset($rank_map[$domain]) ? (int) $rank_map[$domain] : 0;
+                if ($comp_rank <= 0) {
+                    continue;
+                }
+                $hit_count++;
+                if ($best_comp_rank === 0 || $comp_rank < $best_comp_rank) {
+                    $best_comp_rank = $comp_rank;
+                    $best_comp_domain = $domain;
+                }
+            }
+
+            if ($best_comp_rank === 0) {
+                continue;
+            }
+
+            $gap = $target_rank === 0 ? (max(10, (int) $serp_depth) + 1 - $best_comp_rank) : ($target_rank - $best_comp_rank);
+            if ($gap < 3) {
+                continue;
+            }
+
+            $impact_score = min(100, ($gap * 8.0) + ($hit_count * 6.0) + ((float) (isset($row['value']) ? $row['value'] : 1.0) * 5.0));
+            $effort_score = $target_rank === 0 ? 70.0 : 45.0;
+            list($priority, $priority_score) = self::calc_priority($impact_score, $effort_score);
+            $actions[] = array(
+                'keyword' => isset($row['keyword']) ? (string) $row['keyword'] : '',
+                'group' => isset($row['group']) ? (string) $row['group'] : 'default',
+                'priority' => $priority,
+                'priority_score' => $priority_score,
+                'impact_score' => round($impact_score, 2),
+                'effort_score' => round($effort_score, 2),
+                'target_rank' => $target_rank,
+                'best_competitor' => $best_comp_domain,
+                'best_competitor_rank' => $best_comp_rank,
+                'recommendation' => $target_rank === 0
+                    ? 'Create net-new high-value page and add to llms pin list.'
+                    : 'Refresh existing page title/meta/schema and re-submit in sitemap/llms.',
+            );
+        }
+
+        usort($actions, function ($a, $b) {
+            return (float) (isset($b['priority_score']) ? $b['priority_score'] : 0) <=> (float) (isset($a['priority_score']) ? $a['priority_score'] : 0);
+        });
+
+        return array_slice($actions, 0, 20);
+    }
+
+    private static function get_non_outreach_domains() {
+        return array(
+            'google.com',
+            'bing.com',
+            'youtube.com',
+            'facebook.com',
+            'instagram.com',
+            'x.com',
+            'twitter.com',
+            'linkedin.com',
+            'wikipedia.org',
+            'reddit.com',
+            'pinterest.com',
+            'tiktok.com',
+        );
+    }
+
+    private static function domain_matches_any($domain, array $patterns) {
+        $domain = strtolower((string) $domain);
+        foreach ($patterns as $pattern) {
+            $pattern = strtolower(trim((string) $pattern));
+            if ($pattern === '') {
+                continue;
+            }
+            if ($domain === $pattern || substr($domain, -strlen('.' . $pattern)) === '.' . $pattern) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function build_outreach_plan_from_monitor(array $monitor, array $settings) {
+        $meta = isset($monitor['meta']) && is_array($monitor['meta']) ? $monitor['meta'] : array();
+        $target_domain = self::normalize_domain_value(isset($meta['target_domain']) ? (string) $meta['target_domain'] : home_url('/'));
+        $keywords = isset($monitor['keywords']) && is_array($monitor['keywords']) ? $monitor['keywords'] : array();
+        $actions = isset($monitor['actions']) && is_array($monitor['actions']) ? $monitor['actions'] : array();
+        $competitors = isset($monitor['competitors']) && is_array($monitor['competitors']) ? $monitor['competitors'] : array();
+        $pitch_url = isset($settings['outreach_pitch_url']) && $settings['outreach_pitch_url'] !== '' ? (string) $settings['outreach_pitch_url'] : home_url('/');
+        $site_name = isset($settings['outreach_site_name']) && $settings['outreach_site_name'] !== '' ? (string) $settings['outreach_site_name'] : get_bloginfo('name');
+        $offer = isset($settings['outreach_offer']) && $settings['outreach_offer'] !== '' ? (string) $settings['outreach_offer'] : 'Resource inclusion request';
+        $max_prospects = max(5, min(200, (int) (isset($settings['outreach_max_prospects']) ? $settings['outreach_max_prospects'] : 30)));
+        $min_score = max(0, min(100, (float) (isset($settings['outreach_min_prospect_score']) ? $settings['outreach_min_prospect_score'] : 8)));
+        $min_opportunities = max(1, min(50, (int) (isset($settings['outreach_min_opportunities']) ? $settings['outreach_min_opportunities'] : 1)));
+
+        $competitor_set = array();
+        foreach ($competitors as $comp) {
+            $domain = is_array($comp) ? (isset($comp['domain']) ? $comp['domain'] : '') : $comp;
+            $domain = self::normalize_domain_value($domain);
+            if ($domain !== '') {
+                $competitor_set[$domain] = true;
+            }
+        }
+
+        $blocked = array_merge(self::get_non_outreach_domains(), self::parse_monitor_competitors(isset($settings['monitor_competitors']) ? $settings['monitor_competitors'] : '', $target_domain));
+        $action_map = array();
+        foreach ($actions as $action) {
+            if (is_array($action) && !empty($action['keyword'])) {
+                $action_map[(string) $action['keyword']] = $action;
+            }
+        }
+
+        $domain_stats = array();
+        foreach ($keywords as $kw) {
+            if (!is_array($kw) || !empty($kw['is_brand'])) {
+                continue;
+            }
+            $target_rank = (int) (isset($kw['target_rank']) ? $kw['target_rank'] : 0);
+            if ($target_rank > 0 && $target_rank <= 3) {
+                continue;
+            }
+
+            $top_domains = isset($kw['top_domains']) && is_array($kw['top_domains']) ? $kw['top_domains'] : array();
+            $keyword = isset($kw['keyword']) ? (string) $kw['keyword'] : '';
+            $group = isset($kw['group']) ? (string) $kw['group'] : 'default';
+            $value = (float) (isset($kw['value']) ? $kw['value'] : 1.0);
+            $action = isset($action_map[$keyword]) && is_array($action_map[$keyword]) ? $action_map[$keyword] : array();
+            $best_comp = isset($action['best_competitor']) ? (string) $action['best_competitor'] : '';
+            $best_comp_rank = (int) (isset($action['best_competitor_rank']) ? $action['best_competitor_rank'] : 0);
+
+            foreach ($top_domains as $rank => $raw_domain) {
+                $domain = self::normalize_domain_value((string) $raw_domain);
+                if ($domain === '' || $domain === $target_domain) {
+                    continue;
+                }
+                if (isset($competitor_set[$domain])) {
+                    continue;
+                }
+                if (self::domain_matches_any($domain, $blocked)) {
+                    continue;
+                }
+
+                $serp_rank = ((int) $rank) + 1;
+                $gap_bonus = $target_rank === 0 ? 6.0 : min(6.0, max(0.0, ($target_rank - 3) * 0.8));
+                $rank_score = max(0.5, 11.0 - min($serp_rank, 10));
+                $score = ($rank_score + $gap_bonus) * max(0.1, $value);
+
+                if (!isset($domain_stats[$domain])) {
+                    $domain_stats[$domain] = array(
+                        'score' => 0.0,
+                        'hits' => 0,
+                        'rank_sum' => 0.0,
+                        'keywords' => array(),
+                        'top_gap_keyword' => $keyword,
+                        'top_gap_group' => $group,
+                        'top_gap_weight' => $score,
+                        'best_competitor' => $best_comp,
+                        'best_competitor_rank' => $best_comp_rank,
+                    );
+                }
+
+                $domain_stats[$domain]['score'] += $score;
+                $domain_stats[$domain]['hits']++;
+                $domain_stats[$domain]['rank_sum'] += $serp_rank;
+                $domain_stats[$domain]['keywords'][] = $keyword;
+
+                if ($score > (float) $domain_stats[$domain]['top_gap_weight']) {
+                    $domain_stats[$domain]['top_gap_weight'] = $score;
+                    $domain_stats[$domain]['top_gap_keyword'] = $keyword;
+                    $domain_stats[$domain]['top_gap_group'] = $group;
+                    $domain_stats[$domain]['best_competitor'] = $best_comp;
+                    $domain_stats[$domain]['best_competitor_rank'] = $best_comp_rank;
+                }
+            }
+        }
+
+        $prospects = array();
+        foreach ($domain_stats as $domain => $info) {
+            $hits = (int) $info['hits'];
+            $score = round((float) $info['score'], 2);
+            if ($hits < $min_opportunities || $score < $min_score) {
+                continue;
+            }
+
+            $keywords_unique = array_slice(array_values(array_unique(array_filter(array_map('strval', (array) $info['keywords'])))), 0, 12);
+            $gap_keyword = (string) $info['top_gap_keyword'];
+            $subject = 'Resource suggestion for ' . ($gap_keyword !== '' ? $gap_keyword : 'this topic');
+            $body = "Hi [First Name],\n\n"
+                . "I was reading your content on " . ($gap_keyword !== '' ? $gap_keyword : 'this topic') . " and found it very useful.\n"
+                . "We recently published a practical resource that may complement your page:\n"
+                . $pitch_url . "\n\n"
+                . 'Offer: ' . $offer . "\n"
+                . "If useful for your readers, feel free to include it as a reference.\n\n"
+                . "Best,\n"
+                . $site_name . "\n";
+
+            $prospects[] = array(
+                'domain' => $domain,
+                'prospect_score' => $score,
+                'opportunities' => $hits,
+                'average_serp_rank' => round(((float) $info['rank_sum']) / max(1, $hits), 2),
+                'top_gap_keyword' => $gap_keyword,
+                'top_gap_group' => (string) $info['top_gap_group'],
+                'best_competitor' => (string) $info['best_competitor'],
+                'best_competitor_rank' => (int) $info['best_competitor_rank'],
+                'keywords' => $keywords_unique,
+                'outreach_angle' => "Gap keyword '" . ($gap_keyword !== '' ? $gap_keyword : 'topic') . "' where your site underperforms.",
+                'contact_email' => '',
+                'contact_page' => 'https://' . $domain . '/contact',
+                'contact_confidence' => 0.2,
+                'email_subject' => $subject,
+                'email_body' => $body,
+            );
+        }
+
+        usort($prospects, function ($a, $b) {
+            return (float) (isset($b['prospect_score']) ? $b['prospect_score'] : 0) <=> (float) (isset($a['prospect_score']) ? $a['prospect_score'] : 0);
+        });
+        $prospects = array_slice($prospects, 0, $max_prospects);
+
+        return array(
+            'meta' => array(
+                'generated_at' => current_time('mysql'),
+                'target_domain' => $target_domain,
+                'pitch_url' => $pitch_url,
+                'site_name' => $site_name,
+                'offer' => $offer,
+            ),
+            'summary' => array(
+                'prospects_total' => count($prospects),
+                'min_prospect_score' => $min_score,
+                'min_opportunities' => $min_opportunities,
+            ),
+            'prospects' => $prospects,
+        );
+    }
+
+    private static function build_outreach_campaign_from_plan(array $plan) {
+        $prospects = array();
+        $plan_prospects = isset($plan['prospects']) && is_array($plan['prospects']) ? $plan['prospects'] : array();
+        foreach ($plan_prospects as $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            $item = $p;
+            $item['status'] = 'queued';
+            $item['attempts'] = 0;
+            $item['last_attempt_at_utc'] = '';
+            $item['sent_at_utc'] = '';
+            $item['followup_due_at_utc'] = '';
+            $item['followup_subject'] = '';
+            $item['followup_body'] = '';
+            $item['followup_count'] = 0;
+            $item['reply_at_utc'] = '';
+            $item['won_at_utc'] = '';
+            $item['lost_at_utc'] = '';
+            $item['verified_link_url'] = '';
+            $item['last_error'] = '';
+            $prospects[] = $item;
+        }
+
+        $campaign = array(
+            'meta' => array(
+                'campaign_id' => 'cmp-' . gmdate('Ymd\THis') . '-' . wp_rand(100, 999),
+                'created_at_utc' => current_time('mysql'),
+                'last_run_at_utc' => '',
+                'target_domain' => isset($plan['meta']['target_domain']) ? $plan['meta']['target_domain'] : '',
+                'pitch_url' => isset($plan['meta']['pitch_url']) ? $plan['meta']['pitch_url'] : '',
+                'site_name' => isset($plan['meta']['site_name']) ? $plan['meta']['site_name'] : get_bloginfo('name'),
+                'offer' => isset($plan['meta']['offer']) ? $plan['meta']['offer'] : 'Resource inclusion request',
+            ),
+            'summary' => array(),
+            'prospects' => $prospects,
+            'runs' => array(),
+        );
+        self::refresh_outreach_campaign_summary($campaign);
+        return $campaign;
+    }
+
+    private static function refresh_outreach_campaign_summary(array &$campaign) {
+        $prospects = isset($campaign['prospects']) && is_array($campaign['prospects']) ? $campaign['prospects'] : array();
+        $summary = array(
+            'prospects_total' => 0,
+            'queued' => 0,
+            'sent' => 0,
+            'failed' => 0,
+            'skipped' => 0,
+            'followup_due' => 0,
+            'replied' => 0,
+            'won' => 0,
+            'lost' => 0,
+        );
+
+        foreach ($prospects as $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            $summary['prospects_total']++;
+            $status = isset($p['status']) ? (string) $p['status'] : 'queued';
+            if (!isset($summary[$status])) {
+                $status = 'queued';
+            }
+            $summary[$status]++;
+        }
+        $campaign['summary'] = $summary;
+    }
+
+    private static function was_outreach_sent_recently(array $state_records, $target_domain, $domain, $cooldown_days) {
+        $target_domain = self::normalize_domain_value($target_domain);
+        $domain = self::normalize_domain_value($domain);
+        $cooldown_days = max(1, (int) $cooldown_days);
+        $now = time();
+        foreach ($state_records as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            if (self::normalize_domain_value(isset($item['target_domain']) ? (string) $item['target_domain'] : '') !== $target_domain) {
+                continue;
+            }
+            if (self::normalize_domain_value(isset($item['domain']) ? (string) $item['domain'] : '') !== $domain) {
+                continue;
+            }
+            $sent_ts = self::safe_parse_time(isset($item['last_sent_at_utc']) ? (string) $item['last_sent_at_utc'] : '');
+            if ($sent_ts === null) {
+                continue;
+            }
+            if (($now - $sent_ts) < ($cooldown_days * DAY_IN_SECONDS)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function mark_outreach_state_sent(array &$state_records, $target_domain, $domain, $campaign_id, $pitch_url) {
+        $target_domain = self::normalize_domain_value($target_domain);
+        $domain = self::normalize_domain_value($domain);
+        $now = current_time('mysql');
+        foreach ($state_records as $idx => $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            if (self::normalize_domain_value(isset($item['target_domain']) ? (string) $item['target_domain'] : '') === $target_domain
+                && self::normalize_domain_value(isset($item['domain']) ? (string) $item['domain'] : '') === $domain) {
+                $state_records[$idx]['last_sent_at_utc'] = $now;
+                $state_records[$idx]['campaign_id'] = $campaign_id;
+                $state_records[$idx]['pitch_url'] = $pitch_url;
+                return;
+            }
+        }
+        $state_records[] = array(
+            'target_domain' => $target_domain,
+            'domain' => $domain,
+            'last_sent_at_utc' => $now,
+            'campaign_id' => $campaign_id,
+            'pitch_url' => $pitch_url,
+        );
+        if (count($state_records) > 1000) {
+            $state_records = array_slice($state_records, -1000);
+        }
+    }
+
+    private static function execute_outreach_campaign(array &$campaign, array &$state_records, array $settings) {
+        $prospects = isset($campaign['prospects']) && is_array($campaign['prospects']) ? $campaign['prospects'] : array();
+        $target_domain = isset($campaign['meta']['target_domain']) ? (string) $campaign['meta']['target_domain'] : '';
+        $pitch_url = isset($campaign['meta']['pitch_url']) ? (string) $campaign['meta']['pitch_url'] : '';
+        $site_name = isset($campaign['meta']['site_name']) ? (string) $campaign['meta']['site_name'] : get_bloginfo('name');
+        $campaign_id = isset($campaign['meta']['campaign_id']) ? (string) $campaign['meta']['campaign_id'] : ('cmp-' . gmdate('Ymd\THis'));
+
+        $provider = self::sanitize_outreach_provider(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run');
+        $cooldown_days = max(1, (int) (isset($settings['outreach_cooldown_days']) ? $settings['outreach_cooldown_days'] : 21));
+        $followup_days = max(1, (int) (isset($settings['outreach_followup_days']) ? $settings['outreach_followup_days'] : 7));
+
+        $sent = 0;
+        $failed = 0;
+        $skipped = 0;
+
+        foreach ($prospects as $idx => $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            $domain = self::normalize_domain_value(isset($p['domain']) ? (string) $p['domain'] : '');
+            if ($domain === '') {
+                continue;
+            }
+            $current_status = isset($p['status']) ? (string) $p['status'] : 'queued';
+            $is_followup = $current_status === 'followup_due';
+
+            if (!$is_followup && self::was_outreach_sent_recently($state_records, $target_domain, $domain, $cooldown_days)) {
+                $prospects[$idx]['status'] = 'skipped';
+                $prospects[$idx]['last_error'] = 'cooldown<' . $cooldown_days . 'd';
+                $skipped++;
+                continue;
+            }
+
+            $payload = array(
+                'campaign_id' => $campaign_id,
+                'target_domain' => $target_domain,
+                'pitch_url' => $pitch_url,
+                'site_name' => $site_name,
+                'domain' => $domain,
+                'top_gap_keyword' => isset($p['top_gap_keyword']) ? (string) $p['top_gap_keyword'] : '',
+                'top_gap_group' => isset($p['top_gap_group']) ? (string) $p['top_gap_group'] : '',
+                'email_subject' => $is_followup && !empty($p['followup_subject']) ? (string) $p['followup_subject'] : (isset($p['email_subject']) ? (string) $p['email_subject'] : ''),
+                'email_body' => $is_followup && !empty($p['followup_body']) ? (string) $p['followup_body'] : (isset($p['email_body']) ? (string) $p['email_body'] : ''),
+                'contact_email' => isset($p['contact_email']) ? (string) $p['contact_email'] : '',
+                'contact_page' => isset($p['contact_page']) ? (string) $p['contact_page'] : '',
+            );
+
+            $exec = array('ok' => false, 'detail' => 'unsupported provider');
+            if ($provider === 'dry-run') {
+                $exec = array('ok' => true, 'detail' => 'dry-run');
+            } elseif ($provider === 'webhook') {
+                $exec = self::post_json_webhook(
+                    isset($settings['outreach_webhook_url']) ? (string) $settings['outreach_webhook_url'] : '',
+                    isset($settings['outreach_webhook_token']) ? (string) $settings['outreach_webhook_token'] : '',
+                    $payload,
+                    20
+                );
+            } elseif ($provider === 'command') {
+                $exec = self::run_command_provider(
+                    isset($settings['outreach_command_template']) ? (string) $settings['outreach_command_template'] : '',
+                    $payload
+                );
+            }
+
+            $prospects[$idx]['attempts'] = (int) (isset($p['attempts']) ? $p['attempts'] : 0) + 1;
+            $prospects[$idx]['last_attempt_at_utc'] = current_time('mysql');
+            if (!empty($exec['ok'])) {
+                $prospects[$idx]['status'] = 'sent';
+                $prospects[$idx]['sent_at_utc'] = current_time('mysql');
+                $prospects[$idx]['followup_due_at_utc'] = gmdate('Y-m-d H:i:s', time() + ($followup_days * DAY_IN_SECONDS));
+                if ($is_followup) {
+                    $prospects[$idx]['followup_count'] = (int) (isset($p['followup_count']) ? $p['followup_count'] : 0) + 1;
+                }
+                $prospects[$idx]['last_error'] = '';
+                self::mark_outreach_state_sent($state_records, $target_domain, $domain, $campaign_id, $pitch_url);
+                $sent++;
+            } else {
+                $prospects[$idx]['status'] = 'failed';
+                $prospects[$idx]['last_error'] = isset($exec['detail']) ? (string) $exec['detail'] : 'failed';
+                $failed++;
+            }
+        }
+
+        $run = array(
+            'run_id' => 'run-' . gmdate('Ymd\THis') . '-' . wp_rand(100, 999),
+            'provider' => $provider,
+            'started_at_utc' => current_time('mysql'),
+            'finished_at_utc' => current_time('mysql'),
+            'sent' => $sent,
+            'failed' => $failed,
+            'skipped' => $skipped,
+            'cooldown_days' => $cooldown_days,
+        );
+
+        $campaign['prospects'] = $prospects;
+        $runs = isset($campaign['runs']) && is_array($campaign['runs']) ? $campaign['runs'] : array();
+        $runs[] = $run;
+        $campaign['runs'] = array_slice($runs, -60);
+        $campaign['meta']['last_run_at_utc'] = $run['finished_at_utc'];
+        self::refresh_outreach_campaign_summary($campaign);
+
+        return $run;
+    }
+
+    private static function verify_outreach_campaign(array &$campaign, array $settings) {
+        $prospects = isset($campaign['prospects']) && is_array($campaign['prospects']) ? $campaign['prospects'] : array();
+        $pitch_url = isset($campaign['meta']['pitch_url']) ? (string) $campaign['meta']['pitch_url'] : '';
+        $followup_days = max(1, (int) (isset($settings['outreach_followup_days']) ? $settings['outreach_followup_days'] : 7));
+
+        $checked = 0;
+        $won = 0;
+        $followup_due = 0;
+        $unchanged = 0;
+
+        foreach ($prospects as $idx => $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            $domain = self::normalize_domain_value(isset($p['domain']) ? (string) $p['domain'] : '');
+            if ($domain === '') {
+                continue;
+            }
+            $status = isset($p['status']) ? (string) $p['status'] : 'queued';
+            if ($status === 'won' || $status === 'lost') {
+                continue;
+            }
+
+            $checked++;
+            $verify = self::verify_backlink_presence($domain, $pitch_url);
+            if (!empty($verify['found'])) {
+                $prospects[$idx]['status'] = 'won';
+                $prospects[$idx]['won_at_utc'] = current_time('mysql');
+                $matched = isset($verify['matched_urls']) && is_array($verify['matched_urls']) ? $verify['matched_urls'] : array();
+                $prospects[$idx]['verified_link_url'] = !empty($matched[0]) ? (string) $matched[0] : '';
+                $won++;
+                continue;
+            }
+
+            $sent_ts = self::safe_parse_time(isset($p['sent_at_utc']) ? (string) $p['sent_at_utc'] : '');
+            if ($sent_ts !== null && ($status === 'sent' || $status === 'followup_due')) {
+                $age_days = (time() - $sent_ts) / DAY_IN_SECONDS;
+                if ($age_days >= $followup_days) {
+                    $prospects[$idx]['status'] = 'followup_due';
+                    list($follow_subject, $follow_body) = self::build_outreach_followup_content($p, isset($campaign['meta']) && is_array($campaign['meta']) ? $campaign['meta'] : array());
+                    $prospects[$idx]['followup_subject'] = $follow_subject;
+                    $prospects[$idx]['followup_body'] = $follow_body;
+                    if (empty($prospects[$idx]['followup_due_at_utc'])) {
+                        $prospects[$idx]['followup_due_at_utc'] = current_time('mysql');
+                    }
+                    $followup_due++;
+                    continue;
+                }
+            }
+
+            $unchanged++;
+        }
+
+        $campaign['prospects'] = $prospects;
+        $runs = isset($campaign['runs']) && is_array($campaign['runs']) ? $campaign['runs'] : array();
+        $runs[] = array(
+            'run_id' => 'run-verify-' . gmdate('Ymd\THis') . '-' . wp_rand(100, 999),
+            'provider' => 'verify',
+            'started_at_utc' => current_time('mysql'),
+            'finished_at_utc' => current_time('mysql'),
+            'checked' => $checked,
+            'won' => $won,
+            'followup_due' => $followup_due,
+            'unchanged' => $unchanged,
+        );
+        $campaign['runs'] = array_slice($runs, -60);
+        $campaign['meta']['last_run_at_utc'] = current_time('mysql');
+        self::refresh_outreach_campaign_summary($campaign);
+
+        return array(
+            'checked' => $checked,
+            'won' => $won,
+            'followup_due' => $followup_due,
+            'unchanged' => $unchanged,
+        );
+    }
+
+    private static function verify_backlink_presence($domain, $pitch_url) {
+        $domain = self::normalize_domain_value($domain);
+        $pitch_url = trim((string) $pitch_url);
+        if ($domain === '' || $pitch_url === '') {
+            return array('found' => false, 'matched_urls' => array(), 'checked' => array());
+        }
+
+        $pitch_host = self::normalize_domain_value($pitch_url);
+        $base = 'https://' . $domain;
+        $pages = array(
+            $base . '/',
+            $base . '/resources',
+            $base . '/links',
+            $base . '/blog',
+            $base . '/sitemap.xml',
+        );
+
+        $checked = array();
+        $matched = array();
+        foreach ($pages as $url) {
+            $resp = self::fetch_url($url, array('limit_response_size' => 1500000, 'timeout' => 20));
+            $checked[] = array(
+                'url' => $url,
+                'status' => isset($resp['status_code']) ? (int) $resp['status_code'] : 0,
+            );
+            if (!empty($resp['error']) || (int) $resp['status_code'] !== 200) {
+                continue;
+            }
+            $body = strtolower((string) $resp['body']);
+            if (strpos($body, strtolower($pitch_url)) !== false || ($pitch_host !== '' && strpos($body, $pitch_host) !== false)) {
+                $matched[] = $url;
+            }
+        }
+
+        return array(
+            'found' => !empty($matched),
+            'matched_urls' => $matched,
+            'checked' => $checked,
+        );
+    }
+
+    private static function build_outreach_followup_content(array $prospect, array $meta) {
+        $keyword = isset($prospect['top_gap_keyword']) ? (string) $prospect['top_gap_keyword'] : 'this topic';
+        $pitch_url = isset($meta['pitch_url']) ? (string) $meta['pitch_url'] : '';
+        $site_name = isset($meta['site_name']) ? (string) $meta['site_name'] : get_bloginfo('name');
+        $subject = 'Quick follow-up: resource for ' . $keyword;
+        $body = "Hi,\n\n"
+            . "Quick follow-up on my previous note about your " . $keyword . " page.\n"
+            . "Sharing again in case useful for your readers:\n"
+            . $pitch_url . "\n\n"
+            . "Best,\n"
+            . $site_name . "\n";
+        return array($subject, $body);
+    }
+
+    private static function collect_urls_from_site_sitemaps($base_url, $max_urls) {
+        $max_urls = max(50, min(3000, (int) $max_urls));
+        $target_host = self::normalize_domain_value($base_url);
+        if ($target_host === '') {
+            return array();
+        }
+
+        $queue = array(
+            home_url('/sitemap.xml'),
+            home_url('/sitemap_index.xml'),
+            home_url('/wp-sitemap.xml'),
+        );
+        $visited = array();
+        $urls = array();
+
+        while (!empty($queue) && count($urls) < $max_urls && count($visited) < 40) {
+            $current = array_shift($queue);
+            $key = self::normalize_comparable_url($current);
+            if ($key === '' || isset($visited[$key])) {
+                continue;
+            }
+            $visited[$key] = true;
+
+            $resp = self::fetch_url($current, array('limit_response_size' => 2000000, 'timeout' => 20));
+            if (!empty($resp['error']) || (int) $resp['status_code'] !== 200 || !self::content_type_matches($resp['content_type'], array('xml', 'text/xml', 'application/xml'))) {
+                continue;
+            }
+
+            $parsed = self::parse_sitemap_xml_for_urls($resp['body']);
+            $kind = isset($parsed['kind']) ? (string) $parsed['kind'] : 'unknown';
+            $locs = isset($parsed['locs']) && is_array($parsed['locs']) ? $parsed['locs'] : array();
+            if (empty($locs)) {
+                continue;
+            }
+
+            if ($kind === 'sitemapindex') {
+                foreach ($locs as $loc) {
+                    $normalized = self::normalize_comparable_url($loc);
+                    if ($normalized === '' || isset($visited[$normalized]) || in_array($loc, $queue, true)) {
+                        continue;
+                    }
+                    $queue[] = $loc;
+                }
+                continue;
+            }
+
+            foreach ($locs as $loc) {
+                $host = self::normalize_domain_value($loc);
+                if ($host === '' || $host !== $target_host) {
+                    continue;
+                }
+                if (!in_array($loc, $urls, true)) {
+                    $urls[] = $loc;
+                }
+                if (count($urls) >= $max_urls) {
+                    break;
+                }
+            }
+        }
+
+        return $urls;
+    }
+
+    private static function parse_sitemap_xml_for_urls($xml_text) {
+        $xml_text = trim((string) $xml_text);
+        if ($xml_text === '') {
+            return array('kind' => 'unknown', 'locs' => array());
+        }
+
+        $kind = 'unknown';
+        if (stripos($xml_text, '<sitemapindex') !== false) {
+            $kind = 'sitemapindex';
+        } elseif (stripos($xml_text, '<urlset') !== false) {
+            $kind = 'urlset';
+        }
+
+        $locs = array();
+        if (preg_match_all('/<loc[^>]*>\s*([^<]+)\s*<\/loc>/i', $xml_text, $matches)) {
+            foreach ($matches[1] as $loc) {
+                $loc = trim(html_entity_decode((string) $loc, ENT_QUOTES, 'UTF-8'));
+                if ($loc !== '' && !in_array($loc, $locs, true)) {
+                    $locs[] = $loc;
+                }
+            }
+        }
+
+        return array(
+            'kind' => $kind,
+            'locs' => $locs,
+        );
+    }
+
+    private static function extract_internal_urls_from_text($text, $host) {
+        $host = self::normalize_domain_value($host);
+        if ($host === '') {
+            return array();
+        }
+        $urls = array();
+        if (!preg_match_all('#https?://[^\s<>"\'\)]+#i', (string) $text, $matches)) {
+            return $urls;
+        }
+
+        foreach ($matches[0] as $raw) {
+            $raw = trim((string) $raw);
+            $raw = trim($raw, " \t\n\r\0\x0B.,;:()[]{}<>\"'");
+            $domain = self::normalize_domain_value($raw);
+            if ($domain !== $host) {
+                continue;
+            }
+            if (!in_array($raw, $urls, true)) {
+                $urls[] = $raw;
+            }
+        }
+        return $urls;
+    }
+
+    private static function extract_internal_links_from_html($html, $base_url, $host, $limit = 300) {
+        $host = self::normalize_domain_value($host);
+        $limit = max(20, min(2000, (int) $limit));
+        if ($host === '') {
+            return array();
+        }
+
+        $urls = array();
+        if (!preg_match_all('/<a[^>]+href=["\']([^"\']+)["\']/i', (string) $html, $matches)) {
+            return $urls;
+        }
+
+        foreach ($matches[1] as $href) {
+            $href = trim((string) $href);
+            if ($href === '' || strpos($href, '#') === 0 || stripos($href, 'javascript:') === 0 || stripos($href, 'mailto:') === 0) {
+                continue;
+            }
+            $absolute = wp_http_validate_url($href) ? $href : home_url(self::normalize_path($href));
+            if (!$absolute) {
+                continue;
+            }
+            $domain = self::normalize_domain_value($absolute);
+            if ($domain !== $host) {
+                continue;
+            }
+            if (!in_array($absolute, $urls, true)) {
+                $urls[] = $absolute;
+            }
+            if (count($urls) >= $limit) {
+                break;
+            }
+        }
+        return $urls;
+    }
+
+    private static function is_low_value_index_url($url) {
+        $path = strtolower(self::normalize_path($url));
+        $patterns = array(
+            '#/wp-admin/?#',
+            '#/wp-login\.php#',
+            '#/login/?#',
+            '#/register/?#',
+            '#/signup/?#',
+            '#/checkout/?#',
+            '#/cart/?#',
+            '#/my-account/?#',
+            '#/account/?#',
+            '#/password#',
+            '#/lost-password#',
+            '#/preview#',
+            '#/feed/?#',
+        );
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $path)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function classify_index_group_for_url($url, $base_url) {
+        if (self::is_low_value_index_url($url)) {
+            return 'low_value';
+        }
+
+        $normalized_base = self::normalize_comparable_url(trailingslashit($base_url));
+        $normalized_url = self::normalize_comparable_url($url);
+        if ($normalized_base !== '' && $normalized_url === $normalized_base) {
+            return 'core';
+        }
+
+        $path = strtolower(self::normalize_path($url));
+        if (preg_match('#/(blog|posts?|article|articles|news|insights)/#', $path) || preg_match('#/20\d{2}/\d{1,2}/#', $path)) {
+            return 'blog';
+        }
+
+        $segments = array_filter(explode('/', trim($path, '/')));
+        $depth = count($segments);
+        if ($depth <= 1) {
+            return 'core';
+        }
+        if ($depth >= 2) {
+            return 'blog';
+        }
+        return 'other';
+    }
+
+    private static function sort_index_pool_items($a, $b) {
+        $ag = isset($a['group']) ? (string) $a['group'] : 'other';
+        $bg = isset($b['group']) ? (string) $b['group'] : 'other';
+        if ($ag === $bg) {
+            return strcmp(isset($a['url']) ? (string) $a['url'] : '', isset($b['url']) ? (string) $b['url'] : '');
+        }
+        return strcmp($ag, $bg);
+    }
+
+    private static function index_records_by_key(array $records) {
+        $mapped = array();
+        foreach ($records as $row) {
+            if (!is_array($row) || empty($row['url'])) {
+                continue;
+            }
+            $key = self::normalize_comparable_url((string) $row['url']);
+            if ($key === '') {
+                continue;
+            }
+            $mapped[$key] = $row;
+        }
+        return $mapped;
+    }
+
+    private static function probe_index_status_for_url($url, $group, array $settings) {
+        $resp = self::fetch_url($url, array('limit_response_size' => 1500000, 'timeout' => 20));
+        $status_code = (int) (isset($resp['status_code']) ? $resp['status_code'] : 0);
+        $content_type = isset($resp['content_type']) ? (string) $resp['content_type'] : '';
+        $x_robots = isset($resp['headers']['x-robots-tag']) ? strtolower((string) $resp['headers']['x-robots-tag']) : '';
+
+        $status = 'unknown';
+        $reason = 'unclassified';
+        $indexable = false;
+        $canonical = '';
+        $meta_robots = array();
+        $search_hit = false;
+        $search_results = 0;
+
+        if ($status_code === 404 || $status_code === 410) {
+            $status = 'not_indexed';
+            $reason = 'http_' . $status_code;
+        } elseif ($status_code === 0) {
+            $status = 'unknown';
+            $reason = 'fetch_error';
+        } elseif ($status_code >= 500) {
+            $status = 'unknown';
+            $reason = 'http_' . $status_code;
+        } elseif ($status_code >= 300 && $status_code < 400) {
+            $status = 'unknown';
+            $reason = 'http_' . $status_code;
+        } elseif ($status_code === 200) {
+            if (self::content_type_matches($content_type, array('html'))) {
+                $meta = self::extract_meta_tags(isset($resp['body']) ? (string) $resp['body'] : '');
+                $canonical = self::extract_link_tag_href(isset($resp['body']) ? (string) $resp['body'] : '', 'canonical');
+                foreach (array('robots', 'googlebot') as $robot_key) {
+                    if (!empty($meta[$robot_key])) {
+                        $meta_robots[] = strtolower((string) $meta[$robot_key]);
+                    }
+                }
+                $robots_blob = implode(',', $meta_robots);
+                if (strpos($x_robots, 'noindex') !== false || strpos($robots_blob, 'noindex') !== false) {
+                    $status = 'not_indexed';
+                    $reason = 'noindex';
+                } else {
+                    $indexable = true;
+                }
+            } else {
+                if (strpos($x_robots, 'noindex') !== false) {
+                    $status = 'not_indexed';
+                    $reason = 'noindex';
+                } else {
+                    $indexable = true;
+                }
+            }
+
+            if ($indexable) {
+                $depth = max(5, min(20, (int) (isset($settings['index_search_depth']) ? $settings['index_search_depth'] : 8)));
+                $serp = self::fetch_bing_results_for_keyword('"' . $url . '"', $depth);
+                $serp_urls = isset($serp['urls']) && is_array($serp['urls']) ? $serp['urls'] : array();
+                $search_results = count($serp_urls);
+                $target_key = self::normalize_comparable_url($url);
+                foreach ($serp_urls as $serp_url) {
+                    if (self::normalize_comparable_url($serp_url) === $target_key) {
+                        $search_hit = true;
+                        break;
+                    }
+                }
+                if ($search_hit) {
+                    $status = 'indexed';
+                    $reason = 'search_exact_match';
+                } else {
+                    if ($search_results === 0) {
+                        $status = 'unknown';
+                        $reason = 'search_empty';
+                    } else {
+                        $status = 'not_indexed';
+                        $reason = 'search_no_match';
+                    }
+                }
+            }
+        }
+
+        return array(
+            'url' => $url,
+            'group' => $group,
+            'status' => in_array($status, array('indexed', 'not_indexed', 'unknown'), true) ? $status : 'unknown',
+            'reason' => $reason,
+            'checked_at_utc' => current_time('mysql'),
+            'http_status' => $status_code,
+            'content_type' => $content_type,
+            'indexable' => (bool) $indexable,
+            'canonical' => $canonical,
+            'meta_robots' => $meta_robots,
+            'x_robots_tag' => $x_robots,
+            'search_hit' => $search_hit,
+            'search_results' => $search_results,
+            'error' => !empty($resp['error']) ? (string) $resp['error_message'] : '',
+        );
+    }
+
+    private static function merge_index_track_records(array $current_records, array $previous_records) {
+        $merged = array();
+        $now = current_time('mysql');
+        foreach ($current_records as $item) {
+            if (!is_array($item) || empty($item['url'])) {
+                continue;
+            }
+            $key = self::normalize_comparable_url((string) $item['url']);
+            $prev = ($key !== '' && isset($previous_records[$key]) && is_array($previous_records[$key])) ? $previous_records[$key] : array();
+            $checked_at = isset($item['checked_at_utc']) ? (string) $item['checked_at_utc'] : $now;
+            $cur_status = isset($item['status']) ? (string) $item['status'] : 'unknown';
+            $prev_status = isset($prev['status']) ? (string) $prev['status'] : '';
+
+            $item['first_seen_utc'] = isset($prev['first_seen_utc']) && $prev['first_seen_utc'] !== '' ? (string) $prev['first_seen_utc'] : $checked_at;
+            $prev_first_indexed = isset($prev['first_indexed_utc']) ? (string) $prev['first_indexed_utc'] : '';
+            $prev_first_not_indexed = isset($prev['first_not_indexed_utc']) ? (string) $prev['first_not_indexed_utc'] : '';
+
+            if ($cur_status === 'indexed') {
+                $item['first_indexed_utc'] = $prev_first_indexed !== '' ? $prev_first_indexed : $checked_at;
+            } else {
+                $item['first_indexed_utc'] = $prev_first_indexed;
+            }
+
+            if ($cur_status === 'not_indexed') {
+                $item['first_not_indexed_utc'] = $prev_first_not_indexed !== '' ? $prev_first_not_indexed : $checked_at;
+            } else {
+                $item['first_not_indexed_utc'] = $prev_first_not_indexed;
+            }
+
+            if ($prev_status !== '' && $prev_status !== $cur_status) {
+                $item['last_status_change_utc'] = $checked_at;
+            } else {
+                $item['last_status_change_utc'] = isset($prev['last_status_change_utc']) && $prev['last_status_change_utc'] !== ''
+                    ? (string) $prev['last_status_change_utc']
+                    : $checked_at;
+            }
+
+            if (!empty($item['first_not_indexed_utc']) && $cur_status === 'not_indexed') {
+                $not_idx_ts = self::safe_parse_time((string) $item['first_not_indexed_utc']);
+                $item['not_indexed_age_days'] = $not_idx_ts !== null ? round((time() - $not_idx_ts) / DAY_IN_SECONDS, 2) : 0.0;
+            } else {
+                $item['not_indexed_age_days'] = 0.0;
+            }
+
+            $merged[] = $item;
+        }
+
+        usort($merged, function ($a, $b) {
+            return strcmp(isset($a['url']) ? (string) $a['url'] : '', isset($b['url']) ? (string) $b['url'] : '');
+        });
+
+        return $merged;
+    }
+
+    private static function compute_index_track_changes(array $records, array $previous_records, $long_unindexed_days) {
+        $long_unindexed_days = max(1, (int) $long_unindexed_days);
+        $newly = array();
+        $dropped = array();
+        $status_changed = array();
+        $long_unindexed = array();
+
+        foreach ($records as $item) {
+            if (!is_array($item) || empty($item['url'])) {
+                continue;
+            }
+            $url = (string) $item['url'];
+            $key = self::normalize_comparable_url($url);
+            $prev = ($key !== '' && isset($previous_records[$key]) && is_array($previous_records[$key])) ? $previous_records[$key] : array();
+            $prev_status = isset($prev['status']) ? (string) $prev['status'] : '';
+            $cur_status = isset($item['status']) ? (string) $item['status'] : 'unknown';
+
+            if ($prev_status !== '' && $prev_status !== $cur_status) {
+                $status_changed[] = array('url' => $url, 'from' => $prev_status, 'to' => $cur_status);
+            }
+            if ($cur_status === 'indexed' && in_array($prev_status, array('not_indexed', 'unknown'), true)) {
+                $newly[] = array('url' => $url, 'from' => $prev_status, 'to' => 'indexed');
+            }
+            if ($prev_status === 'indexed' && in_array($cur_status, array('not_indexed', 'unknown'), true)) {
+                $dropped[] = array('url' => $url, 'from' => 'indexed', 'to' => $cur_status);
+            }
+
+            if ($cur_status === 'not_indexed') {
+                $age = (float) (isset($item['not_indexed_age_days']) ? $item['not_indexed_age_days'] : 0);
+                if ($age >= $long_unindexed_days) {
+                    $long_unindexed[] = array(
+                        'url' => $url,
+                        'group' => isset($item['group']) ? (string) $item['group'] : 'other',
+                        'age_days' => $age,
+                        'reason' => isset($item['reason']) ? (string) $item['reason'] : '',
+                    );
+                }
+            }
+        }
+
+        usort($newly, function ($a, $b) { return strcmp((string) $a['url'], (string) $b['url']); });
+        usort($dropped, function ($a, $b) { return strcmp((string) $a['url'], (string) $b['url']); });
+        usort($status_changed, function ($a, $b) { return strcmp((string) $a['url'], (string) $b['url']); });
+        usort($long_unindexed, array(__CLASS__, 'sort_long_unindexed_desc'));
+
+        return array(
+            'newly_indexed' => $newly,
+            'dropped_indexed' => $dropped,
+            'status_changed' => $status_changed,
+            'long_unindexed' => $long_unindexed,
+        );
+    }
+
+    private static function summarize_index_track_records(array $records) {
+        $by_status = array('indexed' => 0, 'not_indexed' => 0, 'unknown' => 0);
+        $groups = array();
+        foreach ($records as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $status = isset($row['status']) ? (string) $row['status'] : 'unknown';
+            if (!isset($by_status[$status])) {
+                $status = 'unknown';
+            }
+            $by_status[$status]++;
+
+            $group = isset($row['group']) ? (string) $row['group'] : 'other';
+            if (!isset($groups[$group])) {
+                $groups[$group] = array('total' => 0, 'indexed' => 0);
+            }
+            $groups[$group]['total']++;
+            if ($status === 'indexed') {
+                $groups[$group]['indexed']++;
+            }
+        }
+
+        $total = count($records);
+        $indexed = $by_status['indexed'];
+        return array(
+            'total' => $total,
+            'indexed' => $indexed,
+            'not_indexed' => $by_status['not_indexed'],
+            'unknown' => $by_status['unknown'],
+            'index_rate_pct' => round(($indexed / max(1, $total)) * 100, 2),
+            'groups' => $groups,
+        );
+    }
+
+    private static function parse_index_status_filter($raw) {
+        $items = array_map('trim', explode(',', strtolower((string) $raw)));
+        $clean = array();
+        foreach ($items as $item) {
+            if (in_array($item, array('indexed', 'not_indexed', 'unknown'), true) && !in_array($item, $clean, true)) {
+                $clean[] = $item;
+            }
+        }
+        if (empty($clean)) {
+            $clean = array('not_indexed', 'unknown');
+        }
+        return $clean;
+    }
+
+    private static function is_google_indexing_supported_url($url) {
+        $path = strtolower(self::normalize_path($url));
+        return (bool) preg_match('#/(job|jobs|career|careers|hiring|live|stream|broadcast|event|events)/#', $path);
+    }
+
+    private static function submit_to_google_indexing_api($url, $token) {
+        $url = trim((string) $url);
+        $token = trim((string) $token);
+        if ($url === '' || $token === '') {
+            return array('ok' => false, 'detail' => 'missing_google_token_or_url');
+        }
+
+        $response = wp_remote_post(
+            'https://indexing.googleapis.com/v3/urlNotifications:publish',
+            array(
+                'timeout' => 20,
+                'headers' => array(
+                    'Authorization' => 'Bearer ' . $token,
+                    'Content-Type' => 'application/json; charset=utf-8',
+                ),
+                'body' => wp_json_encode(array(
+                    'url' => $url,
+                    'type' => 'URL_UPDATED',
+                ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            )
+        );
+
+        if (is_wp_error($response)) {
+            return array('ok' => false, 'detail' => $response->get_error_message());
+        }
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = (string) wp_remote_retrieve_body($response);
+        return array(
+            'ok' => ($code >= 200 && $code < 300),
+            'detail' => 'HTTP ' . $code . ': ' . substr(trim($body), 0, 220),
+        );
+    }
+
+    private static function post_json_webhook($url, $token, array $payload, $timeout = 15) {
+        $url = trim((string) $url);
+        if ($url === '') {
+            return array('ok' => false, 'detail' => 'missing_webhook_url');
+        }
+
+        $headers = array(
+            'Content-Type' => 'application/json; charset=utf-8',
+        );
+        $token = trim((string) $token);
+        if ($token !== '') {
+            $headers['Authorization'] = 'Bearer ' . $token;
+        }
+
+        $response = wp_remote_post($url, array(
+            'timeout' => max(5, (int) $timeout),
+            'headers' => $headers,
+            'body' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        ));
+
+        if (is_wp_error($response)) {
+            return array('ok' => false, 'detail' => $response->get_error_message());
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = (string) wp_remote_retrieve_body($response);
+        return array(
+            'ok' => ($code >= 200 && $code < 300),
+            'detail' => 'HTTP ' . $code . ': ' . substr(trim($body), 0, 220),
+        );
+    }
+
+    private static function run_command_provider($template, array $payload) {
+        $template = trim((string) $template);
+        if ($template === '') {
+            return array('ok' => false, 'detail' => 'missing_command_template');
+        }
+        if (!function_exists('proc_open')) {
+            return array('ok' => false, 'detail' => 'proc_open_not_available');
+        }
+
+        $replacements = array();
+        foreach ($payload as $key => $value) {
+            if (!is_scalar($value)) {
+                continue;
+            }
+            $k = '{' . $key . '}';
+            $q = '{' . $key . '_q}';
+            $string_value = (string) $value;
+            $replacements[$k] = $string_value;
+            $replacements[$q] = escapeshellarg($string_value);
+        }
+
+        $command = strtr($template, $replacements);
+        $descriptor = array(
+            1 => array('pipe', 'w'),
+            2 => array('pipe', 'w'),
+        );
+        $pipes = array();
+        $process = @proc_open($command, $descriptor, $pipes);
+        if (!is_resource($process)) {
+            return array('ok' => false, 'detail' => 'failed_to_start_process');
+        }
+
+        $stdout = is_resource($pipes[1]) ? stream_get_contents($pipes[1]) : '';
+        $stderr = is_resource($pipes[2]) ? stream_get_contents($pipes[2]) : '';
+        if (is_resource($pipes[1])) {
+            fclose($pipes[1]);
+        }
+        if (is_resource($pipes[2])) {
+            fclose($pipes[2]);
+        }
+        $code = proc_close($process);
+        $output = trim((string) ($stdout !== '' ? $stdout : $stderr));
+
+        return array(
+            'ok' => ((int) $code === 0),
+            'detail' => $output !== '' ? substr($output, 0, 220) : ('exit_code=' . (int) $code),
+        );
+    }
+
+    private static function get_llms_url_compare_set() {
+        $host = self::normalize_domain_value(home_url('/'));
+        $set = array();
+        foreach (array('/llms.txt', '/llms-full.txt') as $path) {
+            $resp = self::fetch_url(home_url($path), array('limit_response_size' => 1200000, 'timeout' => 20));
+            if (!empty($resp['error']) || (int) $resp['status_code'] !== 200) {
+                continue;
+            }
+            foreach (self::extract_internal_urls_from_text(isset($resp['body']) ? (string) $resp['body'] : '', $host) as $url) {
+                $key = self::normalize_comparable_url($url);
+                if ($key !== '') {
+                    $set[$key] = true;
+                }
+            }
+        }
+        return $set;
+    }
+
+    private static function get_index_audit_issue_definitions() {
+        return array(
+            'crawl_failed' => array('priority' => 'P0', 'message' => 'URL 抓取失败（5xx/网络错误）。', 'fix' => '先修可用性与稳定性，确保 URL 对搜索引擎 200 可访问。'),
+            'not_found' => array('priority' => 'P0', 'message' => 'URL 返回 404/410。', 'fix' => '确认页面是否应存在；应存在则恢复 200，不应存在则从收录池移除。'),
+            'noindex' => array('priority' => 'P0', 'message' => '检测到 noindex（meta 或 x-robots-tag）。', 'fix' => '移除 noindex 或仅对低价值页保留 noindex。'),
+            'canonical_conflict' => array('priority' => 'P1', 'message' => 'canonical 指向了不同 URL。', 'fix' => '将 canonical 改为页面自身规范 URL。'),
+            'soft_404' => array('priority' => 'P1', 'message' => '疑似软 404（内容空薄或 404 语义）。', 'fix' => '补全主体内容并去掉“未找到”语义文案。'),
+            'thin_content' => array('priority' => 'P2', 'message' => '页面内容过薄。', 'fix' => '补充核心段落、FAQ、示例，提升正文密度。'),
+            'weak_internal_links' => array('priority' => 'P2', 'message' => '内链信号偏弱（首页未发现该 URL）。', 'fix' => '从首页/目录页/相关文章添加可抓取文本链接。'),
+            'missing_in_llms' => array('priority' => 'P2', 'message' => '该 URL 未出现在 llms 池。', 'fix' => '重建 llms，并确保高价值页被纳入。'),
+        );
+    }
+
+    private static function audit_index_url_entry($url, $group, $thin_threshold_chars, $homepage_body, array $llms_url_set) {
+        $defs = self::get_index_audit_issue_definitions();
+        $issues = array();
+        $resp = self::fetch_url($url, array('limit_response_size' => 1500000, 'timeout' => 20));
+        $status_code = (int) (isset($resp['status_code']) ? $resp['status_code'] : 0);
+        $content_type = isset($resp['content_type']) ? (string) $resp['content_type'] : '';
+        $x_robots = isset($resp['headers']['x-robots-tag']) ? strtolower((string) $resp['headers']['x-robots-tag']) : '';
+        $body = isset($resp['body']) ? (string) $resp['body'] : '';
+        $title = self::extract_html_title($body);
+
+        if ($status_code === 0 || $status_code >= 500) {
+            $cfg = $defs['crawl_failed'];
+            $issues[] = array('code' => 'crawl_failed', 'priority' => $cfg['priority'], 'message' => $cfg['message'], 'fix' => $cfg['fix']);
+        } elseif ($status_code === 404 || $status_code === 410) {
+            $cfg = $defs['not_found'];
+            $issues[] = array('code' => 'not_found', 'priority' => $cfg['priority'], 'message' => $cfg['message'], 'fix' => $cfg['fix']);
+        } else {
+            $meta = self::extract_meta_tags($body);
+            $robots_blob = '';
+            foreach (array('robots', 'googlebot') as $key) {
+                if (!empty($meta[$key])) {
+                    $robots_blob .= ',' . strtolower((string) $meta[$key]);
+                }
+            }
+
+            if (strpos($x_robots, 'noindex') !== false || strpos($robots_blob, 'noindex') !== false) {
+                $cfg = $defs['noindex'];
+                $issues[] = array('code' => 'noindex', 'priority' => $cfg['priority'], 'message' => $cfg['message'], 'fix' => $cfg['fix']);
+            }
+
+            $canonical = self::extract_link_tag_href($body, 'canonical');
+            $canonical_key = $canonical !== '' ? self::normalize_comparable_url($canonical) : '';
+            $self_key = self::normalize_comparable_url($url);
+            if ($canonical_key !== '' && $self_key !== '' && $canonical_key !== $self_key) {
+                $cfg = $defs['canonical_conflict'];
+                $issues[] = array(
+                    'code' => 'canonical_conflict',
+                    'priority' => $cfg['priority'],
+                    'message' => $cfg['message'],
+                    'fix' => $cfg['fix'],
+                    'canonical' => $canonical,
+                );
+            }
+
+            $title_lower = strtolower((string) $title);
+            $body_lower = strtolower(substr($body, 0, 12000));
+            if (strpos($title_lower, '404') !== false || strpos(substr($body_lower, 0, 3000), 'not found') !== false || strpos(substr($body_lower, 0, 3000), '页面不存在') !== false) {
+                $cfg = $defs['soft_404'];
+                $issues[] = array('code' => 'soft_404', 'priority' => $cfg['priority'], 'message' => $cfg['message'], 'fix' => $cfg['fix']);
+            }
+
+            $text_len = self::get_html_text_length($body);
+            if (in_array($group, array('blog', 'core'), true) && $text_len < max(120, (int) $thin_threshold_chars)) {
+                $cfg = $defs['thin_content'];
+                $issues[] = array(
+                    'code' => 'thin_content',
+                    'priority' => $cfg['priority'],
+                    'message' => $cfg['message'],
+                    'fix' => $cfg['fix'],
+                    'chars' => $text_len,
+                );
+            }
+
+            if (in_array($group, array('blog', 'core'), true)) {
+                if ($self_key !== '' && !isset($llms_url_set[$self_key])) {
+                    $cfg = $defs['missing_in_llms'];
+                    $issues[] = array('code' => 'missing_in_llms', 'priority' => $cfg['priority'], 'message' => $cfg['message'], 'fix' => $cfg['fix']);
+                }
+
+                if ($homepage_body !== '') {
+                    $url_lower = strtolower($url);
+                    $path_lower = strtolower(self::normalize_path($url));
+                    if (strpos($homepage_body, $url_lower) === false && strpos($homepage_body, $path_lower) === false) {
+                        $cfg = $defs['weak_internal_links'];
+                        $issues[] = array('code' => 'weak_internal_links', 'priority' => $cfg['priority'], 'message' => $cfg['message'], 'fix' => $cfg['fix']);
+                    }
+                }
+            }
+        }
+
+        $max_priority = 'PASS';
+        foreach ($issues as $issue) {
+            $priority = isset($issue['priority']) ? (string) $issue['priority'] : 'PASS';
+            if ($priority === 'P0') {
+                $max_priority = 'P0';
+                break;
+            }
+            if ($priority === 'P1' && $max_priority !== 'P0') {
+                $max_priority = 'P1';
+            } elseif ($priority === 'P2' && !in_array($max_priority, array('P0', 'P1'), true)) {
+                $max_priority = 'P2';
+            }
+        }
+
+        $status = 'pass';
+        if ($max_priority === 'P0') {
+            $status = 'fail';
+        } elseif ($max_priority === 'P1' || $max_priority === 'P2') {
+            $status = 'warn';
+        }
+
+        return array(
+            'url' => $url,
+            'group' => $group,
+            'status' => $status,
+            'max_priority' => $max_priority,
+            'http_status' => $status_code,
+            'content_type' => $content_type,
+            'issues' => $issues,
+        );
+    }
+
+    private static function sort_index_issue_summary($a, $b) {
+        $order = array('P0' => 0, 'P1' => 1, 'P2' => 2, '' => 9);
+        $ap = isset($a['priority']) ? (string) $a['priority'] : '';
+        $bp = isset($b['priority']) ? (string) $b['priority'] : '';
+        $ar = isset($order[$ap]) ? $order[$ap] : 9;
+        $br = isset($order[$bp]) ? $order[$bp] : 9;
+        if ($ar === $br) {
+            return (int) (isset($b['count']) ? $b['count'] : 0) <=> (int) (isset($a['count']) ? $a['count'] : 0);
+        }
+        return $ar <=> $br;
+    }
+
+    private static function safe_parse_time($value) {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return null;
+        }
+        $ts = strtotime($value);
+        if ($ts === false) {
+            return null;
+        }
+        return (int) $ts;
+    }
+
+    private static function sort_history_by_ts_asc($a, $b) {
+        return (int) (isset($a['_ts']) ? $a['_ts'] : 0) <=> (int) (isset($b['_ts']) ? $b['_ts'] : 0);
+    }
+
+    private static function index_indexed_url_set(array $records) {
+        $set = array();
+        foreach ($records as $row) {
+            if (!is_array($row) || (isset($row['status']) ? (string) $row['status'] : '') !== 'indexed') {
+                continue;
+            }
+            $key = self::normalize_comparable_url(isset($row['url']) ? (string) $row['url'] : '');
+            if ($key !== '') {
+                $set[$key] = true;
+            }
+        }
+        return array_keys($set);
+    }
+
+    private static function sort_long_unindexed_desc($a, $b) {
+        return (float) (isset($b['age_days']) ? $b['age_days'] : 0) <=> (float) (isset($a['age_days']) ? $a['age_days'] : 0);
     }
 
     public static function run_scheduled_scan() {

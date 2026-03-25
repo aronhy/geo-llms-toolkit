@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
 
+## [0.11.0] - 2026-03-25
+
+### Added
+
+- WordPress adapter now includes migrated operational workflows from standalone CLI:
+- monitor pipeline in WP admin
+- outreach plan/run/verify pipeline in WP admin
+- index discover/track/submit/audit/report pipeline in WP admin
+- New WordPress settings sections for Monitor / Outreach / Index parameters.
+- New monitor/index/outreach history persistence option stores for trend and state tracking.
+
+### Changed
+
+- WordPress plugin version bumped to `1.7.0`.
+- Root README now documents dual-track deployment (CLI and WordPress) with separate operation paths.
+- `standalone/README.md` rewritten as deployment-first CLI manual.
+- `adapters/wordpress/README.md` rewritten as deployment-first plugin manual.
+- `adapters/wordpress/readme.txt` stable tag and changelog updated to `1.7.0`.
+
 ## [0.1.0] - 2026-03-24
 
 ### Added
@@ -160,3 +179,22 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 - Built-in `apify` provider and custom command payload now support follow-up sends using follow-up templates when applicable.
 - Standalone CLI version and default user-agent bumped to `0.9.0`.
+
+## [0.10.0] - 2026-03-25
+
+### Added
+
+- New standalone `geo index` workflow with subcommands:
+- `geo index discover`: build expected index URL pool from sitemap + llms + homepage links with grouping (`core` / `blog` / `low_value` / `other`).
+- `geo index track`: track URL-level index state (`indexed` / `not_indexed` / `unknown`), persist snapshot history, and emit change lists:
+- newly indexed
+- dropped indexed
+- long unindexed
+- `geo index submit`: submit URL batches via `dry-run`, `google-indexing`, `webhook`, or `command` providers with submission logs.
+- `geo index audit`: diagnose non-index causes (`noindex`, canonical conflict, soft-404, thin content, crawl failures, weak internal links, missing llms coverage) and output prioritized fixes.
+- `geo index report`: generate weekly trend report from historical track snapshots (index rate, deindex rate, recovery rate, template performance).
+
+### Changed
+
+- Root README, standalone README, and examples updated with index workflow commands.
+- Standalone CLI version and default user-agent bumped to `0.10.0`.

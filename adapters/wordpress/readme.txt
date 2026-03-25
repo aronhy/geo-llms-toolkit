@@ -4,7 +4,7 @@ Tags: seo, llms, schema, sitemap, cloudflare
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.6.0
+Stable tag: 1.7.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -121,6 +121,16 @@ Service terms and privacy:
 
 == Changelog ==
 
+= 1.7.0 =
+
+* Migrated standalone CLI core workflows into WordPress admin workbench:
+* Monitor run pipeline
+* Outreach plan/run/verify pipeline
+* Index discover/track/submit/audit/report pipeline
+* Added full settings panels for Monitor / Outreach / Index in plugin admin.
+* Added history persistence for monitor/index/outreach runs.
+* Updated plugin version and distribution metadata to 1.7.0.
+
 = 1.6.0 =
 
 * Added GEO Agent loop mode for scheduled runs (`scan -> auto-fix -> verify -> rollback if degraded`).
@@ -166,6 +176,10 @@ Service terms and privacy:
 * Initial public release with automatic LLMS regeneration.
 
 == Upgrade Notice ==
+
+= 1.7.0 =
+
+Adds full Monitor / Outreach / Index operational workflows directly inside WordPress admin.
 
 = 1.6.0 =
 

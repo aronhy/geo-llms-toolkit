@@ -18,6 +18,11 @@ This folder stores usage examples for standalone and adapter modes.
 ./geo outreach run --campaign-file ./output/outreach/outreach-campaign.json --provider apify --run-followup-due --apify-token "$APIFY_TOKEN"
 ./geo outreach update --campaign-file ./output/outreach/outreach-campaign.json --domain example.org --new-status won --note "link placed"
 ./geo outreach status --campaign-file ./output/outreach/outreach-campaign.json
+./geo index discover example.com --format json --output ./output/index-discover.json
+./geo index track example.com --discover-report ./output/index-discover.json --history-dir ./.geo-history/index --format json --output ./output/index-track.json
+./geo index submit example.com --from-track-report ./output/index-track.json --provider dry-run --output ./output/index-submit.md
+./geo index audit example.com --from-track-report ./output/index-track.json --status-filter not_indexed,unknown --output ./output/index-audit.md
+./geo index report example.com --history-dir ./.geo-history/index --days 30 --output ./output/index-report.md
 ```
 
 ## Adapter examples (planned)

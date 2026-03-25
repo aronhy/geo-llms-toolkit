@@ -1,8 +1,18 @@
 # geo-llms-toolkit
 
-Open-source GEO toolkit. Download and run directly on any website (not only WordPress).
+开源 GEO 工具集，包含两个可独立使用的版本：
 
-## 1) Download and run (Standalone CLI)
+- **Standalone CLI（非 WordPress）**
+- **WordPress 插件（GEO LLMS Auto Regenerator）**
+
+## 版本选择
+
+| 版本 | 适用场景 | 入口 |
+| --- | --- | --- |
+| Standalone CLI | 任意网站（静态站/Shopify/自建 CMS） | [standalone/README.md](./standalone/README.md) |
+| WordPress 插件 | 希望在后台按钮化运行 | [adapters/wordpress/README.md](./adapters/wordpress/README.md) |
+
+## 1) Standalone CLI 快速部署
 
 ```bash
 git clone https://github.com/aronhy/geo-llms-toolkit.git
@@ -11,145 +21,82 @@ chmod +x geo
 ./geo --help
 ```
 
-### Quick commands
+最短闭环：
 
 ```bash
-# GEO scan
 ./geo scan aronhouyu.com
-
-# Export scan report
-./geo scan aronhouyu.com --format json --output ./output/scan.json
-
-# Generate llms.txt and llms-full.txt
 ./geo llms aronhouyu.com --output-dir ./output
-
-# One-shot (scan + llms generation)
-./geo all aronhouyu.com --output-dir ./output --report-format markdown
-
-# Competitor monitor (keywords + competitor domains)
-./geo monitor aronhouyu.com \
-  --keywords-file ./examples/keywords.txt \
-  --competitor example.com \
-  --discover-competitors \
-  --format json \
-  --output ./output/monitor.json
-
-# Compare monitor snapshots
-./geo monitor-diff \
-  --current-report ./output/monitor.json \
-  --previous-report ./.geo-history/monitor-aronhouyu.com-YYYYMMDDTHHMMSSZ.json \
-  --output ./output/monitor-diff.md
-
-# Build outreach plan from monitor result
-./geo outreach \
-  plan \
-  --monitor-report ./output/monitor.json \
-  --pitch-url https://aronhouyu.com/your-best-page \
-  --site-name "Aron Houyu" \
-  --enrich-contacts \
-  --output-dir ./output/outreach
-
-# Execute outreach (default only-new with cooldown)
-./geo outreach run \
-  --campaign-file ./output/outreach/outreach-campaign.json \
-  --provider dry-run
-
-# Verify link wins and auto-mark followup_due
-./geo outreach verify \
-  --campaign-file ./output/outreach/outreach-campaign.json \
-  --followup-days 7
-
-# Send second touch for followup_due prospects
-./geo outreach run \
-  --campaign-file ./output/outreach/outreach-campaign.json \
-  --provider dry-run \
-  --run-followup-due
-
-# Execute outreach via webhook
-./geo outreach run \
-  --campaign-file ./output/outreach/outreach-campaign.json \
-  --provider webhook \
-  --webhook-url https://your-automation-endpoint.example/webhook \
-  --webhook-token YOUR_TOKEN
-
-# Execute outreach via backlink-outreach-js adapter
-./geo outreach run \
-  --campaign-file ./output/outreach/outreach-campaign.json \
-  --provider apify \
-  --apify-token "$APIFY_TOKEN" \
-  --run-followup-due \
-  --apify-output-dir ./output/outreach/apify
-
-# Show campaign status
-./geo outreach status \
-  --campaign-file ./output/outreach/outreach-campaign.json
+./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --discover-competitors --output ./output/monitor.json --format json
+./geo index discover aronhouyu.com --output ./output/index-discover.json --format json
+./geo index track aronhouyu.com --discover-report ./output/index-discover.json --output ./output/index-track.json --format json
+./geo index audit aronhouyu.com --from-track-report ./output/index-track.json --output ./output/index-audit.md
+./geo index report aronhouyu.com --history-dir ./.geo-history/index --days 30 --output ./output/index-report.md
 ```
 
-Standalone guide: [standalone/README.md](./standalone/README.md)
-backlink adapter guide: [docs/backlink-outreach-js-adapter.md](./docs/backlink-outreach-js-adapter.md)
+## 2) WordPress 插件快速部署
 
-## 2) If your site is WordPress
-
-WordPress adapter is still included in this repository:
-
-- `adapters/wordpress` (production adapter)
-- Includes llms auto-regeneration, GEO scan, safe-fix flow, report export, optional cache purge.
-
-Install docs: [adapters/wordpress/readme.txt](./adapters/wordpress/readme.txt)
-Detailed setup (BT + Nginx + Cloudflare): [docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
-
-## 3) Latest updates (Standalone 0.9.0 + WordPress 1.6.0)
-
-- **New CLI competitor monitor** (`geo monitor`): keyword-based competitor scoring, brand/non-brand keyword split, prioritized action list (`P0/P1/P2`), and history snapshots for weekly trend tracking.
-- **Monitor improvements**: configurable weights (`--weights-file`) and snapshot compare (`geo monitor-diff`).
-- **Outreach workflow** (`geo outreach plan/run/status/verify/update`): plan generation + campaign state + executable run layer (dry-run/webhook/command), contact enrichment, only-new strategy, cooldown dedupe, and win/followup verification.
-- **Apify built-in provider** (`--provider apify`): direct integration via `scripts/backlink_outreach_adapter.py` without hand-writing command templates.
-- **Auto second touch**: `outreach verify` now generates followup templates/CSV and `outreach run --run-followup-due` can execute second-touch sends.
-
-- **Issue-driven auto safe-fix**: regenerate missing `llms.txt` / `llms-full.txt`, enforce homepage `<link rel="llms" href="/llms.txt">`, enable low-value page `noindex`, and enable WP-layer endpoint fallback for `robots.txt` / `sitemap.xml` / `sitemap_index.xml` / `wp-sitemap.xml`.
-- **Safe-fix mode levels**: `Strict` (default, low-risk only, no H1/H2/CSS/UI structural edits) and `Balanced` (extends with fallback OG/Twitter + Schema output without changing template structure).
-- **GEO Agent loop mode**: supports `scan -> auto-fix -> verify -> rollback if degraded`, with manual action button and scheduled mode switch.
-- **WordPress release ZIP packaging**: build with `./scripts/build-wordpress-zip.sh`; latest package in repo is `dist/geo-llms-auto-regenerator-1.6.0.zip`.
-
-## 4) Repository layout
-
-```text
-geo-llms-toolkit/
-  geo                      # standalone CLI launcher
-  standalone/              # standalone implementation
-  adapters/
-    wordpress/             # WordPress adapter
-  core/
-    docs/                  # engine contracts/design
-  docs/
-    architecture.md
-    roadmap.md
-    migration-plan.md
-  examples/
-```
-
-## 5) Common dev commands
+在仓库根目录打包：
 
 ```bash
-# WordPress adapter lint
+./scripts/build-wordpress-zip.sh
+```
+
+得到：
+
+- `dist/geo-llms-auto-regenerator-1.7.0.zip`
+
+安装：
+
+1. WordPress 后台 -> `插件 -> 安装插件 -> 上传插件`
+2. 上传 ZIP 并启用 `GEO LLMS Auto Regenerator`
+3. 进入 `设置 -> GEO LLMS Auto`
+4. 先点一次：
+- `立即重建 llms 文件`
+- `立即扫描 GEO`
+
+插件已内置 CLI 迁移工作台按钮：
+
+- `Monitor`
+- `Outreach plan/run/verify`
+- `Index discover/track/submit/audit/report`
+
+## 3) 核心能力
+
+- 站点 GEO 诊断：端点、抓取、schema、noindex、软 404 等
+- LLMS 生成：`llms.txt` / `llms-full.txt`
+- 竞品监控：关键词级别评分、优先级动作建议
+- 外联闭环：计划、执行、状态、回访
+- 收录闭环：发现、跟踪、提交、审计、周报
+- WordPress 安全修复闭环：预览、应用、回滚、定时任务、通知、缓存联动
+
+## 4) 文档导航
+
+- CLI 使用与部署：[standalone/README.md](./standalone/README.md)
+- WordPress 使用与部署：[adapters/wordpress/README.md](./adapters/wordpress/README.md)
+- WordPress 详细环境配置（宝塔/Nginx/Cloudflare）：[docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
+- 外联适配说明：[docs/backlink-outreach-js-adapter.md](./docs/backlink-outreach-js-adapter.md)
+
+## 5) 开发命令
+
+```bash
+# WordPress 插件语法检查
 php -l adapters/wordpress/geo-llms-auto-regenerator.php
 php -l adapters/wordpress/uninstall.php
 php -l adapters/wordpress/languages/index.php
 
-# build WordPress install ZIP
+# 重新打包 WordPress ZIP
 ./scripts/build-wordpress-zip.sh
 
-# standalone CLI help
+# CLI 帮助
 python3 standalone/geo_toolkit.py --help
 ```
 
-## Open-source policy
+## 6) 开源信息
 
 - License: `GPL-2.0-or-later`
-- Issues and pull requests are welcome
-- Keep reusable logic in `core`/`standalone`, keep platform hooks in `adapters/*`
+- Issues / PR 欢迎提交
 
 ## Follow
 
-- X: https://x.com/aronhouyu
-- YouTube: https://www.youtube.com/@aronhouyu1024
+- X: [https://x.com/aronhouyu](https://x.com/aronhouyu)
+- YouTube: [https://www.youtube.com/@aronhouyu1024](https://www.youtube.com/@aronhouyu1024)

@@ -1,98 +1,113 @@
-# GEO LLMS Auto Regenerator
+# GEO LLMS Auto Regenerator（WordPress 版本）
 
-发布或更新已发布内容时，自动重建站点根目录：
+这个版本用于 WordPress 后台一键运行 GEO 工作流，不需要命令行。
 
-- `llms.txt`
-- `llms-full.txt`
+## 1. 功能概览
 
-同时提供：
+- 内容发布/更新自动重建 `llms.txt` 和 `llms-full.txt`
+- GEO 扫描（robots/sitemap/llms + SEO/GEO 信号）
+- 安全修复（预览、应用、回滚）
+- CLI 迁移工作台（后台按钮版）：
+- `Monitor`
+- `Outreach plan/run/verify`
+- `Index discover/track/submit/audit/report`
+- 定时扫描、历史趋势、通知（邮件/Webhook）
+- 缓存联动（Cloudflare + 常见 WP 缓存插件）
 
-- GEO 端点扫描：`robots.txt`、`sitemap.xml`、`sitemap_index.xml`、`wp-sitemap.xml`、`llms.txt`、`llms-full.txt`
-- SEO / GEO 信号扫描：首页 `H1`、首页 `<link rel="llms" href="/llms.txt">`、`canonical`、`og:*` / `twitter:*`、`og:image`、文章 `Article` schema、作者页信号、`BreadcrumbList`、`Organization.sameAs`、软 404、`noindex` 冲突、首页/文章页抓取一致性、低价值页 `noindex`
-- 一键安全修复：启用低价值 llms 过滤、低价值页 `noindex`、基础 OG/Twitter 与 schema 补全（未检测到常见 SEO 插件时）
-- 自动安全修复：扫描后根据问题自动执行（llms 缺失重建、LLMS Link 注入、低价值页 noindex、WP 层端点修复）
-- 安全模式分级：`Strict`（默认，只做低风险，不动 H1/H2/CSS/UI）与 `Balanced`（额外补 OG/Twitter + Schema）
-- 安全修复预览：`dry run`、预计变更说明、回滚上次修复、恢复默认设置
-- 前台输出：首页 `<head>` 自动声明 `llms.txt` 位置
-- LLMS 规则中心：选择纳入的内容类型与分类、手动 Pin、全局排除规则、单篇自定义 llms 摘要
-- 兼容环境识别：Yoast / Rank Math / AIOSEO / WooCommerce / 静态首页博客页 / Polylang / WPML
-- 定时扫描与历史趋势：支持每日/每周扫描，保存历史结果与趋势变化
-- GEO Agent 闭环：可在定时任务中执行“扫描 -> 自动修复 -> 复扫 -> 回滚”
-- 通知能力：支持邮件与 Webhook，可自定义模板，占位符已预设
-- 缓存联动：重建 llms 后，可选清理 Cloudflare 和常见 WordPress 页面缓存
-- 报告导出：支持导出 Markdown / JSON / CSV GEO 报告
-- 产品基础设施：配置导入/导出、卸载清理、版本迁移、错误日志、后台权限控制、textdomain 加载
+## 2. 部署安装
 
-## 安装
+### 方式 A：从仓库打包 ZIP 安装（推荐）
 
-1. 在仓库根目录构建可安装 ZIP：
-   - `./scripts/build-wordpress-zip.sh`
-2. 构建产物在：
-   - `dist/geo-llms-auto-regenerator-<version>.zip`
-3. 在 WP 后台安装：
-   - `插件 -> 安装插件 -> 上传插件`
-   - 选择上面的 ZIP 并启用 `GEO LLMS Auto Regenerator`
-4. 后台可手动触发：
-   - `设置 -> GEO LLMS Auto -> 立即重建 llms 文件`
+```bash
+cd /path/to/geo-llms-toolkit
+./scripts/build-wordpress-zip.sh
+```
 
-详细环境配置（宝塔 + Nginx + Cloudflare）：
-- `../../docs/wordpress-detailed-setup.md`
+生成文件：
 
-## 触发条件
+- `dist/geo-llms-auto-regenerator-<version>.zip`
 
-- 新发布文章/页面
-- 已发布内容更新
-- 已发布内容删除/恢复
+然后在 WordPress 后台：
 
-## 后台功能
+1. `插件 -> 安装插件 -> 上传插件`
+2. 上传 ZIP
+3. 激活插件 `GEO LLMS Auto Regenerator`
+
+### 方式 B：源码目录安装
+
+把 `adapters/wordpress` 拷到：
+
+- `/wp-content/plugins/geo-llms-auto-regenerator`
+
+然后在后台启用。
+
+## 3. 首次配置（建议顺序）
+
+后台路径：
 
 - `设置 -> GEO LLMS Auto`
-- 可手动执行：
-  - `立即重建 llms 文件`
-  - `立即扫描 GEO`
-  - `预览安全修复`
-  - `一键应用安全修复`
-  - `回滚上次修复`
-  - `恢复默认设置`
-- 可配置：
-  - 后台权限
-  - 错误日志
-  - 卸载时是否自动清理数据
-  - 纳入的内容类型
-  - 纳入的分类 / 类目
-  - 手动 Pin 内容
-  - 全局排除规则
-  - llms 是否排除低价值页
-  - 低价值页是否自动 `noindex`
-  - 安全修复模式（Strict / Balanced）
-  - 是否自动输出首页 LLMS Link
-  - 是否启用 WP 层端点修复（robots/sitemap）
-  - 是否输出基础 OG/Twitter
-  - 是否输出基础 schema
-  - 扫描后是否自动执行安全修复
-  - 手动扫描是否也自动执行安全修复
-  - 是否启用 GEO Agent 闭环模式（定时扫描时生效）
-  - 是否启用缓存联动
-  - Cloudflare Zone ID / API Token / 清理模式
-  - 额外清理 URL
-  - 定时扫描频率 / 星期 / 时间 / 历史保留条数
-  - 邮件通知 / Webhook 通知
-  - 邮件标题模板 / 正文模板 / Webhook 模板
-  - `Organization Logo URL`
-  - `Organization sameAs`
-- 可导出：
-  - GEO 报告 Markdown / JSON / CSV
-  - 完整插件配置 JSON
-- 可导入：
-  - 完整插件配置 JSON
-- 编辑页侧边栏：
-  - `Custom llms 摘要`
-  - `Pin 到 llms`
-  - `从 llms 排除`
 
-## 输出位置
+首次建议依次操作：
 
-- `ABSPATH/llms.txt`
-- `ABSPATH/llms-full.txt`
+1. 保存一次设置（确保计划任务与选项落库）
+2. 点击 `立即重建 llms 文件`
+3. 点击 `立即扫描 GEO`
+4. 点击 `预览安全修复`，确认后再点 `一键应用安全修复`
 
-如果站点根目录不可写，自动重建会失败。请先确认 Web 用户对站点根目录有写权限。
+## 4. CLI 迁移工作台（后台用法）
+
+在同一个页面有 `CLI 迁移工作台`：
+
+1. `运行 Monitor`
+2. `生成 Outreach 计划`
+3. `执行 Outreach`
+4. `验证 Outreach`
+5. `Index Discover`
+6. `Index Track`
+7. `Index Submit`
+8. `Index Audit`
+9. `Index Report`
+
+## 5. 关键配置项
+
+### Monitor
+
+- 关键词列表（每行一个）
+- 竞品域名（可空）
+- SERP 深度、权重、最大关键词数
+
+### Outreach
+
+- `pitch URL`
+- provider：`dry-run / webhook / command`
+- webhook URL/token 或 command template
+- 冷却天数、follow-up 天数
+
+### Index
+
+- URL 池上限
+- 跟踪深度
+- 提交 provider：`dry-run / google-indexing / webhook / command`
+- 提交状态过滤（默认 `not_indexed,unknown`）
+- 审计薄内容阈值、报告窗口天数
+
+## 6. 验证清单
+
+部署后至少跑一次：
+
+1. `运行 Monitor` 成功返回关键词/竞品/动作数量
+2. `生成 Outreach 计划` 出现 prospects
+3. `Index Discover + Index Track` 生成 URL 和收录状态
+4. `Index Audit` 有问题分级（P0/P1/P2）
+5. `Index Report` 生成趋势数据
+
+## 7. 详细环境配置
+
+- 宝塔 + Nginx + Cloudflare 详细指南：
+- `../../docs/wordpress-detailed-setup.md`
+
+## 8. 注意事项
+
+- 根目录需可写，否则 llms 文件无法生成
+- 若站点有强缓存，建议开启缓存联动
+- `google-indexing` 需要有效 token，先用 `dry-run` 验证流程
