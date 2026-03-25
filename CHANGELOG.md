@@ -106,3 +106,21 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Outreach campaign status now tracks richer lifecycle states:
 - `queued`, `sent`, `followup_due`, `replied`, `won`, `lost`, `failed`, `skipped`.
 - Standalone CLI version and default user-agent bumped to `0.6.0`.
+
+## [0.7.0] - 2026-03-25
+
+### Added
+
+- New adapter script:
+- `scripts/backlink_outreach_adapter.py`
+- designed for `geo outreach run --provider command`
+- integrates with Apify actor `daniil.poletaev/backlink-building-agent`
+- filters actor results by target domain and writes artifact JSON per run
+- Adapter guide:
+- `docs/backlink-outreach-js-adapter.md`
+
+### Changed
+
+- Command template execution now supports shell-safe placeholders:
+- `{domain_q}` `{keyword_q}` `{pitch_url_q}` `{site_name_q}` `{email_subject_q}` `{contact_email_q}` `{contact_page_q}`
+- Standalone CLI version and default user-agent bumped to `0.7.0`.

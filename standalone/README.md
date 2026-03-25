@@ -104,7 +104,7 @@ Outreach execution providers:
 ./geo outreach run \
   --campaign-file ./output/outreach/outreach-campaign.json \
   --provider command \
-  --command-template 'node ./scripts/send.js --domain {domain} --keyword "{keyword}" --url {pitch_url} --email {contact_email}'
+  --command-template 'python3 ./scripts/backlink_outreach_adapter.py --domain {domain_q} --keyword {keyword_q} --pitch-url {pitch_url_q} --site-name {site_name_q} --contact-email {contact_email_q} --contact-page {contact_page_q} --output-dir ./output/outreach/apify'
 ```
 
 ## Output files
@@ -118,6 +118,7 @@ Outreach execution providers:
 - `outreach-plan.json`, `outreach-prospects.csv`, `outreach-report.md`, `outreach-sequences.md` when using `outreach`
 - `outreach-campaign.json` campaign state file for `outreach run/status`
 - `.geo-history/outreach-state.json` cross-run dedupe state (default)
+- `output/outreach/apify/apify-outreach-*.json` adapter artifacts when using backlink adapter
 
 ## Monitor keywords file format
 
@@ -161,3 +162,8 @@ Optional monitor weights JSON:
 - `dry-run`: update campaign status without sending.
 - `webhook`: POST each prospect payload to your automation endpoint.
 - `command`: execute your command template per prospect (for custom adapters).
+- command template variables:
+- raw: `{domain}` `{keyword}` `{pitch_url}` `{site_name}` `{email_subject}` `{contact_email}` `{contact_page}`
+- shell-safe: `{domain_q}` `{keyword_q}` `{pitch_url_q}` `{site_name_q}` `{email_subject_q}` `{contact_email_q}` `{contact_page_q}`
+- for `scripts/backlink_outreach_adapter.py`, set `APIFY_TOKEN` in environment first.
+- adapter guide: `../docs/backlink-outreach-js-adapter.md`

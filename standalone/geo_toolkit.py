@@ -28,9 +28,9 @@ from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.6.0"
+TOOL_VERSION = "0.7.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.6 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.7 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -1020,7 +1020,7 @@ def execute_webhook(
 
 
 def execute_command(command_template: str, payload: Dict[str, object], timeout: int) -> Tuple[bool, str]:
-    values = {
+    raw_values = {
         "domain": str(payload.get("domain") or ""),
         "keyword": str(payload.get("top_gap_keyword") or ""),
         "pitch_url": str(payload.get("pitch_url") or ""),
@@ -1029,7 +1029,13 @@ def execute_command(command_template: str, payload: Dict[str, object], timeout: 
         "contact_email": str(payload.get("contact_email") or ""),
         "contact_page": str(payload.get("contact_page") or ""),
     }
-    command = command_template.format_map(values)
+    values = dict(raw_values)
+    for key, value in raw_values.items():
+        values[f"{key}_q"] = shlex.quote(value)
+    try:
+        command = command_template.format_map(values)
+    except KeyError as e:
+        return False, f"missing template variable: {e}"
     parts = shlex.split(command)
     if not parts:
         return False, "empty command"
@@ -2843,7 +2849,7 @@ def build_parser() -> argparse.ArgumentParser:
     outreach_p.add_argument("--webhook-token", help="Bearer token for webhook authentication.")
     outreach_p.add_argument(
         "--command-template",
-        help="Command template when provider=command. Supported vars: {domain} {keyword} {pitch_url} {site_name} {email_subject} {contact_email} {contact_page}",
+        help="Command template when provider=command. Vars: {domain} {keyword} {pitch_url} {site_name} {email_subject} {contact_email} {contact_page} and shell-safe *_q variants.",
     )
     outreach_p.add_argument(
         "--include-existing",
