@@ -34,18 +34,30 @@ chmod +x geo
   --format json \
   --output ./output/monitor.json
 
+# Compare monitor snapshots
+./geo monitor-diff \
+  --current-report ./output/monitor.json \
+  --previous-report ./.geo-history/monitor-aronhouyu.com-YYYYMMDDTHHMMSSZ.json \
+  --output ./output/monitor-diff.md
+
 # Build outreach plan from monitor result
 ./geo outreach \
   plan \
   --monitor-report ./output/monitor.json \
   --pitch-url https://aronhouyu.com/your-best-page \
   --site-name "Aron Houyu" \
+  --enrich-contacts \
   --output-dir ./output/outreach
 
 # Execute outreach (default only-new with cooldown)
 ./geo outreach run \
   --campaign-file ./output/outreach/outreach-campaign.json \
   --provider dry-run
+
+# Verify link wins and auto-mark followup_due
+./geo outreach verify \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --followup-days 7
 
 # Execute outreach via webhook
 ./geo outreach run \
@@ -71,10 +83,11 @@ WordPress adapter is still included in this repository:
 Install docs: [adapters/wordpress/readme.txt](./adapters/wordpress/readme.txt)
 Detailed setup (BT + Nginx + Cloudflare): [docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
 
-## 3) Latest updates (Standalone 0.5.0 + WordPress 1.6.0)
+## 3) Latest updates (Standalone 0.6.0 + WordPress 1.6.0)
 
 - **New CLI competitor monitor** (`geo monitor`): keyword-based competitor scoring, brand/non-brand keyword split, prioritized action list (`P0/P1/P2`), and history snapshots for weekly trend tracking.
-- **Outreach workflow** (`geo outreach plan/run/status`): plan generation + campaign state + executable run layer (dry-run/webhook/command), with only-new strategy and cooldown dedupe.
+- **Monitor improvements**: configurable weights (`--weights-file`) and snapshot compare (`geo monitor-diff`).
+- **Outreach workflow** (`geo outreach plan/run/status/verify/update`): plan generation + campaign state + executable run layer (dry-run/webhook/command), contact enrichment, only-new strategy, cooldown dedupe, and win/followup verification.
 
 - **Issue-driven auto safe-fix**: regenerate missing `llms.txt` / `llms-full.txt`, enforce homepage `<link rel="llms" href="/llms.txt">`, enable low-value page `noindex`, and enable WP-layer endpoint fallback for `robots.txt` / `sitemap.xml` / `sitemap_index.xml` / `wp-sitemap.xml`.
 - **Safe-fix mode levels**: `Strict` (default, low-risk only, no H1/H2/CSS/UI structural edits) and `Balanced` (extends with fallback OG/Twitter + Schema output without changing template structure).

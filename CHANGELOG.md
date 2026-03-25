@@ -90,3 +90,19 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 - `geo outreach` now defaults to `plan` action for backward compatibility.
 - Standalone CLI version and default user-agent bumped to `0.5.0`.
+
+## [0.6.0] - 2026-03-25
+
+### Added
+
+- `geo monitor` supports external weights config via `--weights-file`.
+- `geo monitor-diff` command to compare two monitor snapshots (score/action deltas).
+- `geo outreach verify` action for backlink win checks and follow-up due marking.
+- `geo outreach update` action for manual status transitions (`replied`/`won`/`lost`, etc.).
+- Optional contact enrichment in outreach planning via `--enrich-contacts`.
+
+### Changed
+
+- Outreach campaign status now tracks richer lifecycle states:
+- `queued`, `sent`, `followup_due`, `replied`, `won`, `lost`, `failed`, `skipped`.
+- Standalone CLI version and default user-agent bumped to `0.6.0`.

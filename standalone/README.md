@@ -15,6 +15,24 @@ chmod +x geo
 ./geo --help
 ```
 
+## CLI feature overview
+
+Current standalone CLI supports 5 capability groups:
+
+| Capability | Command | Purpose | Main outputs |
+| --- | --- | --- | --- |
+| GEO site checks | `geo scan` | Check endpoint/indexability/schema signals | terminal output or `scan.(md/json/csv)` |
+| LLMS generation | `geo llms` | Generate `llms.txt` and `llms-full.txt` from sitemap/content | `llms.txt`, `llms-full.txt` |
+| One-shot pipeline | `geo all` | Run `scan + llms` together | scan report + llms files |
+| Competitor monitoring | `geo monitor` | Keyword-based visibility monitoring, configurable scoring, priority action suggestions | `monitor.(md/json/csv)`, monitor snapshots |
+| Competitor trend diff | `geo monitor-diff` | Compare two monitor reports (score delta/action delta) | `monitor-diff.(md/json/csv)` |
+| Outreach execution workflow | `geo outreach plan/run/status/verify/update` | Build prospect plan, execute runs, verify wins, update status, and track campaign state with only-new cooldown strategy | outreach reports, campaign JSON, status reports |
+
+Outreach execution providers:
+- `dry-run`: simulate execution and update campaign state only.
+- `webhook`: send one payload per prospect to your automation endpoint (n8n/Make/custom API).
+- `command`: execute your command template per prospect (adapter mode, can wrap `backlink-outreach-js`).
+
 ## Commands
 
 ```bash
@@ -39,35 +57,54 @@ chmod +x geo
   --format json \
   --output ./output/monitor.json
 
-# 6) Build outreach plan from monitor result
+# 6) Monitor diff (current vs previous snapshot)
+./geo monitor-diff \
+  --current-report ./output/monitor.json \
+  --previous-report ./.geo-history/monitor-aronhouyu.com-YYYYMMDDTHHMMSSZ.json \
+  --output ./output/monitor-diff.md
+
+# 7) Build outreach plan from monitor result
 ./geo outreach \
   plan \
   --monitor-report ./output/monitor.json \
   --pitch-url https://aronhouyu.com/your-best-page \
   --site-name "Aron Houyu" \
+  --enrich-contacts \
   --output-dir ./output/outreach
 
-# 7) Execute outreach campaign (only-new by default)
+# 8) Execute outreach campaign (only-new by default)
 ./geo outreach run \
   --campaign-file ./output/outreach/outreach-campaign.json \
   --provider dry-run
 
-# 8) Show campaign status
+# 9) Show campaign status
 ./geo outreach status \
   --campaign-file ./output/outreach/outreach-campaign.json
 
-# 9) Execute via webhook automation (n8n/Make/custom API)
+# 10) Verify backlinks + auto mark followup_due
+./geo outreach verify \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --followup-days 7
+
+# 11) Manual status update (replied/won/lost)
+./geo outreach update \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --domain example.com \
+  --new-status won \
+  --note "link added on resources page"
+
+# 12) Execute via webhook automation (n8n/Make/custom API)
 ./geo outreach run \
   --campaign-file ./output/outreach/outreach-campaign.json \
   --provider webhook \
   --webhook-url https://your-automation-endpoint.example/webhook \
   --webhook-token YOUR_TOKEN
 
-# 10) Execute via command adapter (e.g. wrapper around backlink-outreach-js)
+# 13) Execute via command adapter (e.g. wrapper around backlink-outreach-js)
 ./geo outreach run \
   --campaign-file ./output/outreach/outreach-campaign.json \
   --provider command \
-  --command-template 'node ./scripts/send.js --domain {domain} --keyword "{keyword}" --url {pitch_url}'
+  --command-template 'node ./scripts/send.js --domain {domain} --keyword "{keyword}" --url {pitch_url} --email {contact_email}'
 ```
 
 ## Output files
@@ -76,6 +113,7 @@ chmod +x geo
 - `llms-full.txt`
 - `geo-scan-report.(md|json|csv)` when using `all` or `scan --output`
 - `monitor.(md|json|csv)` when using `monitor --output`
+- `monitor-diff.(md|json|csv)` when using `monitor-diff`
 - `.geo-history/monitor-<domain>-<timestamp>.json` snapshot (default)
 - `outreach-plan.json`, `outreach-prospects.csv`, `outreach-report.md`, `outreach-sequences.md` when using `outreach`
 - `outreach-campaign.json` campaign state file for `outreach run/status`
@@ -102,6 +140,16 @@ ai seo tools,expansion,1.0
 
 - `group` and `value` are optional.
 - `value` is used as lightweight business importance weight.
+
+Optional monitor weights JSON:
+
+```json
+{
+  "keyword_overlap": 0.45,
+  "serp_coappear": 0.35,
+  "rank_pressure": 0.20
+}
+```
 
 ## Notes
 

@@ -28,9 +28,9 @@ from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.5.0"
+TOOL_VERSION = "0.6.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.5 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.6 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -65,6 +65,23 @@ NON_OUTREACH_DOMAINS = {
     "reddit.com",
     "pinterest.com",
     "tiktok.com",
+}
+
+DEFAULT_MONITOR_WEIGHTS = {
+    "keyword_overlap": 0.45,
+    "serp_coappear": 0.35,
+    "rank_pressure": 0.20,
+}
+
+OUTREACH_STATUSES = {
+    "queued",
+    "sent",
+    "failed",
+    "skipped",
+    "followup_due",
+    "replied",
+    "won",
+    "lost",
 }
 
 
@@ -121,6 +138,9 @@ class OutreachProspect:
     best_competitor_rank: int
     keywords: List[str]
     outreach_angle: str
+    contact_email: str
+    contact_page: str
+    contact_confidence: float
     email_subject: str
     email_body: str
 
@@ -479,6 +499,159 @@ def calc_priority(impact_score: float, effort_score: float) -> Tuple[str, float]
     return label, round(priority_score, 2)
 
 
+def load_monitor_weights(path: Optional[Path]) -> Dict[str, float]:
+    if not path:
+        return dict(DEFAULT_MONITOR_WEIGHTS)
+    if not path.exists():
+        raise ValueError(f"weights file not found: {path}")
+    data = read_json_file(path)
+    weights = dict(DEFAULT_MONITOR_WEIGHTS)
+    for key in list(weights.keys()):
+        raw = data.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value < 0:
+            continue
+        weights[key] = value
+
+    total = sum(weights.values())
+    if total <= 0:
+        return dict(DEFAULT_MONITOR_WEIGHTS)
+    normalized = {k: v / total for k, v in weights.items()}
+    return normalized
+
+
+def extract_emails(text: str) -> List[str]:
+    if not text:
+        return []
+    pattern = r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"
+    found = re.findall(pattern, text, flags=re.I)
+    cleaned = []
+    for email in found:
+        val = email.strip().strip(".,;:()[]{}<>").lower()
+        if val.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg")):
+            continue
+        if val not in cleaned:
+            cleaned.append(val)
+    return cleaned
+
+
+def discover_contact_info(domain: str, timeout: int, user_agent: str) -> Dict[str, object]:
+    base = f"https://{domain}"
+    pages_to_check = [f"{base}/", f"{base}/contact", f"{base}/about", f"{base}/write-for-us"]
+    checked: List[str] = []
+    emails: List[str] = []
+    contact_page = ""
+
+    for url in pages_to_check:
+        res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=1_000_000)
+        checked.append(url)
+        if res.status != 200:
+            continue
+        emails_found = extract_emails(res.body)
+        for e in emails_found:
+            if e not in emails:
+                emails.append(e)
+        if not contact_page and re.search(r"/contact|/write", safe_path(url), flags=re.I):
+            contact_page = url
+        if emails:
+            break
+
+    confidence = 0.0
+    if emails:
+        confidence = 0.8
+    elif len(checked) > 0:
+        confidence = 0.2
+    return {
+        "email": emails[0] if emails else "",
+        "contact_page": contact_page,
+        "confidence": round(confidence, 2),
+        "checked_urls": checked,
+    }
+
+
+def verify_backlink_presence(domain: str, pitch_url: str, timeout: int, user_agent: str) -> Dict[str, object]:
+    base = f"https://{domain}"
+    pitch_host = normalize_domain(pitch_url)
+    pages = [f"{base}/", f"{base}/resources", f"{base}/links", f"{base}/blog", f"{base}/sitemap.xml"]
+    checked = []
+    matched_urls: List[str] = []
+    for url in pages:
+        res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=1_500_000)
+        checked.append({"url": url, "status": res.status})
+        if res.status != 200:
+            continue
+        body = (res.body or "").lower()
+        if pitch_url.lower() in body or (pitch_host and pitch_host in body):
+            matched_urls.append(url)
+
+    return {
+        "found": len(matched_urls) > 0,
+        "matched_urls": matched_urls,
+        "checked": checked,
+    }
+
+
+def load_monitor_diff(current_path: Path, previous_path: Path) -> Dict[str, object]:
+    current = load_monitor_report(current_path)
+    previous = load_monitor_report(previous_path)
+
+    cur_summary = current.get("summary", {})
+    prev_summary = previous.get("summary", {})
+    cur_competitors = {c["domain"]: c for c in current.get("competitors", []) if isinstance(c, dict) and c.get("domain")}
+    prev_competitors = {c["domain"]: c for c in previous.get("competitors", []) if isinstance(c, dict) and c.get("domain")}
+
+    domains_union = sorted(set(cur_competitors.keys()) | set(prev_competitors.keys()))
+    competitor_changes = []
+    for d in domains_union:
+        cur = cur_competitors.get(d, {})
+        prev = prev_competitors.get(d, {})
+        cur_score = float(cur.get("score") or 0.0)
+        prev_score = float(prev.get("score") or 0.0)
+        competitor_changes.append(
+            {
+                "domain": d,
+                "current_score": round(cur_score, 2),
+                "previous_score": round(prev_score, 2),
+                "delta_score": round(cur_score - prev_score, 2),
+                "current_tier": cur.get("tier", "none"),
+                "previous_tier": prev.get("tier", "none"),
+            }
+        )
+
+    cur_actions = {a["keyword"]: a for a in current.get("actions", []) if isinstance(a, dict) and a.get("keyword")}
+    prev_actions = {a["keyword"]: a for a in previous.get("actions", []) if isinstance(a, dict) and a.get("keyword")}
+    added_action_keywords = sorted(set(cur_actions.keys()) - set(prev_actions.keys()))
+    removed_action_keywords = sorted(set(prev_actions.keys()) - set(cur_actions.keys()))
+
+    return {
+        "meta": {
+            "generated_at_utc": now_utc(),
+            "current_report": str(current_path),
+            "previous_report": str(previous_path),
+            "target": current.get("meta", {}).get("target"),
+        },
+        "summary": {
+            "keywords_total_delta": int(cur_summary.get("keywords_total", 0)) - int(prev_summary.get("keywords_total", 0)),
+            "keywords_with_serp_results_delta": int(cur_summary.get("keywords_with_serp_results", 0))
+            - int(prev_summary.get("keywords_with_serp_results", 0)),
+            "competitors_tracked_delta": int(cur_summary.get("competitors_tracked", 0))
+            - int(prev_summary.get("competitors_tracked", 0)),
+            "actions_generated_delta": int(cur_summary.get("actions_generated", 0))
+            - int(prev_summary.get("actions_generated", 0)),
+        },
+        "competitor_changes": sorted(competitor_changes, key=lambda x: x["delta_score"], reverse=True),
+        "actions": {
+            "added_keywords": added_action_keywords,
+            "removed_keywords": removed_action_keywords,
+        },
+    }
+
+
 def domain_matches_any(domain: str, patterns: Sequence[str]) -> bool:
     for p in patterns:
         normalized = normalize_domain(p)
@@ -511,6 +684,9 @@ def build_outreach_plan(
     min_prospect_score: float,
     min_opportunities: int,
     exclude_domains: Sequence[str],
+    enrich_contacts: bool,
+    timeout: int,
+    user_agent: str,
 ) -> Dict[str, object]:
     meta = monitor_report.get("meta", {})
     target_domain = normalize_domain(str(meta.get("target_domain") or meta.get("target") or ""))
@@ -610,6 +786,15 @@ def build_outreach_plan(
 
         angle = f"Gap keyword '{gap_keyword}' where your site underperforms."
         subject = f"Resource suggestion for {gap_keyword}"
+        contact_email = ""
+        contact_page = ""
+        contact_confidence = 0.0
+        if enrich_contacts:
+            contact_info = discover_contact_info(domain, timeout=timeout, user_agent=user_agent)
+            contact_email = str(contact_info.get("email") or "")
+            contact_page = str(contact_info.get("contact_page") or "")
+            contact_confidence = float(contact_info.get("confidence") or 0.0)
+
         body = textwrap.dedent(
             f"""\
             Hi [First Name],
@@ -638,6 +823,9 @@ def build_outreach_plan(
                 best_competitor_rank=best_comp_rank,
                 keywords=unique_keywords,
                 outreach_angle=angle,
+                contact_email=contact_email,
+                contact_page=contact_page,
+                contact_confidence=round(contact_confidence, 2),
                 email_subject=subject,
                 email_body=body,
             )
@@ -676,6 +864,11 @@ def build_campaign_from_plan(plan: Dict[str, object]) -> Dict[str, object]:
         item["attempts"] = 0
         item["last_attempt_at_utc"] = ""
         item["sent_at_utc"] = ""
+        item["followup_due_at_utc"] = ""
+        item["reply_at_utc"] = ""
+        item["won_at_utc"] = ""
+        item["lost_at_utc"] = ""
+        item["verified_link_url"] = ""
         item["last_error"] = ""
         prospects.append(item)
 
@@ -716,13 +909,21 @@ def load_campaign(path: Path) -> Dict[str, object]:
 
 def refresh_campaign_summary(campaign: Dict[str, object]) -> None:
     prospects = campaign.get("prospects", [])
-    queued = sent = failed = skipped = 0
+    queued = sent = failed = skipped = followup_due = replied = won = lost = 0
     for p in prospects:
         if not isinstance(p, dict):
             continue
         status = str(p.get("status") or "queued")
         if status == "sent":
             sent += 1
+        elif status == "followup_due":
+            followup_due += 1
+        elif status == "replied":
+            replied += 1
+        elif status == "won":
+            won += 1
+        elif status == "lost":
+            lost += 1
         elif status == "failed":
             failed += 1
         elif status == "skipped":
@@ -735,6 +936,10 @@ def refresh_campaign_summary(campaign: Dict[str, object]) -> None:
         "sent": sent,
         "failed": failed,
         "skipped": skipped,
+        "followup_due": followup_due,
+        "replied": replied,
+        "won": won,
+        "lost": lost,
     }
 
 
@@ -821,6 +1026,8 @@ def execute_command(command_template: str, payload: Dict[str, object], timeout: 
         "pitch_url": str(payload.get("pitch_url") or ""),
         "site_name": str(payload.get("site_name") or ""),
         "email_subject": str(payload.get("email_subject") or ""),
+        "contact_email": str(payload.get("contact_email") or ""),
+        "contact_page": str(payload.get("contact_page") or ""),
     }
     command = command_template.format_map(values)
     parts = shlex.split(command)
@@ -845,6 +1052,7 @@ def run_outreach_campaign(
     webhook_token: str,
     command_template: str,
     timeout: int,
+    followup_days: int,
 ) -> Dict[str, object]:
     prospects = campaign.get("prospects", [])
     if not isinstance(prospects, list):
@@ -883,6 +1091,8 @@ def run_outreach_campaign(
             "top_gap_group": p.get("top_gap_group"),
             "email_subject": p.get("email_subject"),
             "email_body": p.get("email_body"),
+            "contact_email": p.get("contact_email"),
+            "contact_page": p.get("contact_page"),
             "keywords": p.get("keywords"),
             "prospect_score": p.get("prospect_score"),
             "opportunities": p.get("opportunities"),
@@ -909,6 +1119,8 @@ def run_outreach_campaign(
         if ok:
             p["status"] = "sent"
             p["sent_at_utc"] = now_utc()
+            followup_dt = datetime.now(timezone.utc).timestamp() + (max(1, followup_days) * 86400)
+            p["followup_due_at_utc"] = datetime.fromtimestamp(followup_dt, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
             p["last_error"] = ""
             sent += 1
             update_state_sent(state, target_domain, domain, campaign_id, pitch_url)
@@ -936,6 +1148,118 @@ def run_outreach_campaign(
         campaign_meta["last_run_at_utc"] = run["finished_at_utc"]
     refresh_campaign_summary(campaign)
     return run
+
+
+def update_campaign_prospect_status(
+    campaign: Dict[str, object],
+    domain: str,
+    new_status: str,
+    note: str,
+) -> bool:
+    status = new_status.strip().lower()
+    if status not in OUTREACH_STATUSES:
+        raise ValueError(f"invalid status: {new_status}")
+    target_domain = normalize_domain(domain)
+    prospects = campaign.get("prospects", [])
+    if not isinstance(prospects, list):
+        return False
+    now = now_utc()
+    for p in prospects:
+        if not isinstance(p, dict):
+            continue
+        if normalize_domain(str(p.get("domain") or "")) != target_domain:
+            continue
+        p["status"] = status
+        if status == "replied":
+            p["reply_at_utc"] = now
+        elif status == "won":
+            p["won_at_utc"] = now
+        elif status == "lost":
+            p["lost_at_utc"] = now
+        p["last_error"] = note
+        refresh_campaign_summary(campaign)
+        runs = campaign.setdefault("runs", [])
+        if isinstance(runs, list):
+            runs.append(
+                {
+                    "run_id": datetime.now(timezone.utc).strftime("run-update-%Y%m%dT%H%M%S%fZ"),
+                    "provider": "manual-update",
+                    "started_at_utc": now,
+                    "finished_at_utc": now,
+                    "sent": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "updated_domain": target_domain,
+                    "new_status": status,
+                }
+            )
+        meta = campaign.setdefault("meta", {})
+        if isinstance(meta, dict):
+            meta["last_run_at_utc"] = now
+        return True
+    return False
+
+
+def verify_campaign_backlinks(
+    campaign: Dict[str, object],
+    timeout: int,
+    user_agent: str,
+    followup_days: int,
+) -> Dict[str, int]:
+    prospects = campaign.get("prospects", [])
+    if not isinstance(prospects, list):
+        raise ValueError("invalid campaign: prospects list missing")
+    pitch_url = str(campaign.get("meta", {}).get("pitch_url") or "")
+    now = datetime.now(timezone.utc)
+
+    checked = won = followup_due = unchanged = 0
+    for p in prospects:
+        if not isinstance(p, dict):
+            continue
+        domain = normalize_domain(str(p.get("domain") or ""))
+        status = str(p.get("status") or "queued")
+        if not domain or status in {"won", "lost"}:
+            continue
+
+        checked += 1
+        res = verify_backlink_presence(domain, pitch_url, timeout=timeout, user_agent=user_agent)
+        if bool(res.get("found")):
+            p["status"] = "won"
+            p["won_at_utc"] = now_utc()
+            matched = res.get("matched_urls") or []
+            p["verified_link_url"] = matched[0] if isinstance(matched, list) and matched else ""
+            won += 1
+            continue
+
+        sent_at = parse_utc(str(p.get("sent_at_utc") or ""))
+        if sent_at and status in {"sent", "followup_due"}:
+            age_days = (now - sent_at).total_seconds() / 86400.0
+            if age_days >= max(1, followup_days):
+                p["status"] = "followup_due"
+                followup_due += 1
+                continue
+        unchanged += 1
+
+    refresh_campaign_summary(campaign)
+    runs = campaign.setdefault("runs", [])
+    now_s = now_utc()
+    if isinstance(runs, list):
+        runs.append(
+            {
+                "run_id": datetime.now(timezone.utc).strftime("run-verify-%Y%m%dT%H%M%S%fZ"),
+                "provider": "verify",
+                "started_at_utc": now_s,
+                "finished_at_utc": now_s,
+                "checked": checked,
+                "won": won,
+                "followup_due": followup_due,
+                "unchanged": unchanged,
+            }
+        )
+    meta = campaign.setdefault("meta", {})
+    if isinstance(meta, dict):
+        meta["last_run_at_utc"] = now_s
+    return {"checked": checked, "won": won, "followup_due": followup_due, "unchanged": unchanged}
 
 
 def parse_jsonld_blocks(blocks: Iterable[str]) -> List[Dict[str, object]]:
@@ -1473,6 +1797,7 @@ def run_monitor(
     serp_depth: int,
     auto_discover: bool,
     max_discovered: int,
+    weights: Dict[str, float],
 ) -> Dict[str, object]:
     target_domain = normalize_domain(base_url)
     provided_competitors: List[str] = []
@@ -1507,6 +1832,7 @@ def run_monitor(
         target_rank = rank_by_domain.get(target_domain, 0)
         if target_rank:
             keyword_hits_target += 1
+        serp_confidence = round(min(1.0, len(domains) / max(1, serp_depth)), 2)
         rows.append(
             {
                 "keyword": item.keyword,
@@ -1516,6 +1842,7 @@ def run_monitor(
                 "target_rank": target_rank,
                 "domains": domains,
                 "rank_by_domain": rank_by_domain,
+                "serp_confidence": serp_confidence,
             }
         )
 
@@ -1569,11 +1896,18 @@ def run_monitor(
         non_brand_share = (matched_non_brand / max(1, non_brand_keywords) * 100.0) if non_brand_keywords else 0.0
         brand_share = (matched_brand / max(1, brand_keywords) * 100.0) if brand_keywords else 0.0
 
-        score = (keyword_overlap * 0.45) + (serp_coappear * 0.35) + (rank_pressure * 0.20)
+        score = (
+            keyword_overlap * float(weights.get("keyword_overlap", DEFAULT_MONITOR_WEIGHTS["keyword_overlap"]))
+            + serp_coappear * float(weights.get("serp_coappear", DEFAULT_MONITOR_WEIGHTS["serp_coappear"]))
+            + rank_pressure * float(weights.get("rank_pressure", DEFAULT_MONITOR_WEIGHTS["rank_pressure"]))
+        )
+        data_coverage = (matched / max(1, total_keywords)) * 100.0
+        confidence = round(min(1.0, data_coverage / 100.0) * 100.0, 2)
         competitor_profiles.append(
             {
                 "domain": comp,
                 "score": round(score, 2),
+                "confidence_pct": confidence,
                 "keyword_overlap_pct": round(keyword_overlap, 2),
                 "serp_coappear_pct": round(serp_coappear, 2),
                 "rank_pressure_pct": round(rank_pressure, 2),
@@ -1657,6 +1991,11 @@ def run_monitor(
             "version": TOOL_VERSION,
             "provider": "bing-serp",
             "serp_depth": serp_depth,
+            "weights": {
+                "keyword_overlap": round(float(weights.get("keyword_overlap", DEFAULT_MONITOR_WEIGHTS["keyword_overlap"])), 4),
+                "serp_coappear": round(float(weights.get("serp_coappear", DEFAULT_MONITOR_WEIGHTS["serp_coappear"])), 4),
+                "rank_pressure": round(float(weights.get("rank_pressure", DEFAULT_MONITOR_WEIGHTS["rank_pressure"])), 4),
+            },
         },
         "summary": {
             "keywords_total": total_keywords,
@@ -1664,6 +2003,7 @@ def run_monitor(
             "keywords_non_brand": non_brand_keywords,
             "keywords_target_ranked": keyword_hits_target,
             "keywords_with_serp_results": keywords_with_serp_results,
+            "data_coverage_pct": round((keywords_with_serp_results / max(1, total_keywords)) * 100.0, 2),
             "competitors_tracked": len(competitor_profiles),
             "actions_generated": len(top_actions),
         },
@@ -1676,6 +2016,7 @@ def run_monitor(
                 "value": r["value"],
                 "is_brand": r["is_brand"],
                 "target_rank": r["target_rank"],
+                "serp_confidence": r["serp_confidence"],
                 "top_domains": r["domains"][:10],
             }
             for r in rows
@@ -1729,20 +2070,22 @@ def to_monitor_markdown(report: Dict[str, object]) -> str:
         "",
         f"- Generated (UTC): {meta['generated_at_utc']}",
         f"- Provider: {meta['provider']}",
+        f"- Weights: overlap={meta.get('weights', {}).get('keyword_overlap', '-')}, coappear={meta.get('weights', {}).get('serp_coappear', '-')}, pressure={meta.get('weights', {}).get('rank_pressure', '-')}",
         f"- Keywords: {summary['keywords_total']} (brand={summary['keywords_brand']}, non-brand={summary['keywords_non_brand']})",
         f"- Keywords with SERP data: {summary['keywords_with_serp_results']}",
+        f"- Data coverage: {summary.get('data_coverage_pct', 0)}%",
         f"- Competitors tracked: {summary['competitors_tracked']}",
         f"- Priority actions: {summary['actions_generated']}",
         "",
         "## Competitor Scores",
         "",
-        "| Domain | Tier | Score | Keyword Overlap % | Co-appear % | Rank Pressure % | Non-Brand Share % | Avg Rank |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Domain | Tier | Score | Confidence % | Keyword Overlap % | Co-appear % | Rank Pressure % | Non-Brand Share % | Avg Rank |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
 
     for c in competitors:
         lines.append(
-            f"| {c['domain']} | {str(c['tier']).upper()} | {c['score']} | {c['keyword_overlap_pct']} | "
+            f"| {c['domain']} | {str(c['tier']).upper()} | {c['score']} | {c.get('confidence_pct', 0)} | {c['keyword_overlap_pct']} | "
             f"{c['serp_coappear_pct']} | {c['rank_pressure_pct']} | {c['non_brand_share_pct']} | {c['average_rank']} |"
         )
 
@@ -1776,6 +2119,7 @@ def to_monitor_csv(report: Dict[str, object]) -> str:
             "domain",
             "tier",
             "score",
+            "confidence_pct",
             "keyword_overlap_pct",
             "serp_coappear_pct",
             "rank_pressure_pct",
@@ -1791,6 +2135,7 @@ def to_monitor_csv(report: Dict[str, object]) -> str:
                 c["domain"],
                 c["tier"],
                 c["score"],
+                c.get("confidence_pct", 0),
                 c["keyword_overlap_pct"],
                 c["serp_coappear_pct"],
                 c["rank_pressure_pct"],
@@ -1818,15 +2163,16 @@ def to_outreach_markdown(plan: Dict[str, object]) -> str:
         "",
         "## Prospect List",
         "",
-        "| Domain | Score | Opportunities | Avg SERP Rank | Top Gap Keyword | Best Competitor |",
-        "| --- | ---: | ---: | ---: | --- | --- |",
+        "| Domain | Score | Opportunities | Avg SERP Rank | Top Gap Keyword | Contact | Best Competitor |",
+        "| --- | ---: | ---: | ---: | --- | --- | --- |",
     ]
 
     for p in prospects:
         best_comp = f"{p['best_competitor']} #{p['best_competitor_rank']}" if p["best_competitor"] else "-"
+        contact = p.get("contact_email") or p.get("contact_page") or "-"
         lines.append(
             f"| {p['domain']} | {p['prospect_score']} | {p['opportunities']} | {p['average_serp_rank']} | "
-            f"{p['top_gap_keyword']} | {best_comp} |"
+            f"{p['top_gap_keyword']} | {contact} | {best_comp} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -1846,6 +2192,9 @@ def to_outreach_csv(plan: Dict[str, object]) -> str:
             "top_gap_group",
             "best_competitor",
             "best_competitor_rank",
+            "contact_email",
+            "contact_page",
+            "contact_confidence",
             "keywords",
             "outreach_angle",
             "email_subject",
@@ -1863,6 +2212,9 @@ def to_outreach_csv(plan: Dict[str, object]) -> str:
                 p["top_gap_group"],
                 p["best_competitor"],
                 p["best_competitor_rank"],
+                p.get("contact_email", ""),
+                p.get("contact_page", ""),
+                p.get("contact_confidence", 0),
                 "; ".join(p["keywords"]),
                 p["outreach_angle"],
                 p["email_subject"],
@@ -1878,6 +2230,10 @@ def to_outreach_sequences_markdown(plan: Dict[str, object]) -> str:
         lines.append(f"## {idx}. {p['domain']}")
         lines.append(f"- Score: {p['prospect_score']}")
         lines.append(f"- Top keyword gap: {p['top_gap_keyword']}")
+        if p.get("contact_email"):
+            lines.append(f"- Contact email: {p['contact_email']}")
+        elif p.get("contact_page"):
+            lines.append(f"- Contact page: {p['contact_page']}")
         lines.append(f"- Subject: {p['email_subject']}")
         lines.append("")
         lines.append("```text")
@@ -1928,7 +2284,8 @@ def render_campaign_status_markdown(campaign: Dict[str, object]) -> str:
         f"- Created (UTC): {meta.get('created_at_utc', '-')}",
         f"- Last run (UTC): {meta.get('last_run_at_utc', '-') or '-'}",
         f"- Prospects total: {summary.get('prospects_total', 0)}",
-        f"- Sent / Failed / Skipped / Queued: {summary.get('sent', 0)} / {summary.get('failed', 0)} / {summary.get('skipped', 0)} / {summary.get('queued', 0)}",
+        f"- Sent / Followup / Replied / Won / Lost: {summary.get('sent', 0)} / {summary.get('followup_due', 0)} / {summary.get('replied', 0)} / {summary.get('won', 0)} / {summary.get('lost', 0)}",
+        f"- Failed / Skipped / Queued: {summary.get('failed', 0)} / {summary.get('skipped', 0)} / {summary.get('queued', 0)}",
         "",
     ]
     if isinstance(runs, list) and runs:
@@ -1948,6 +2305,67 @@ def render_campaign_status_markdown(campaign: Dict[str, object]) -> str:
                 f"{run.get('skipped', 0)} | {run.get('finished_at_utc', '-')} |"
             )
     return "\n".join(lines) + "\n"
+
+
+def render_monitor_diff(diff: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(diff, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        from io import StringIO
+
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["domain", "current_score", "previous_score", "delta_score", "current_tier", "previous_tier"])
+        for row in diff.get("competitor_changes", []):
+            writer.writerow(
+                [
+                    row.get("domain"),
+                    row.get("current_score"),
+                    row.get("previous_score"),
+                    row.get("delta_score"),
+                    row.get("current_tier"),
+                    row.get("previous_tier"),
+                ]
+            )
+        return buf.getvalue()
+
+    lines = [
+        f"# GEO Monitor Diff - {diff.get('meta', {}).get('target', '-')}",
+        "",
+        f"- Generated (UTC): {diff.get('meta', {}).get('generated_at_utc', '-')}",
+        f"- Current report: {diff.get('meta', {}).get('current_report', '-')}",
+        f"- Previous report: {diff.get('meta', {}).get('previous_report', '-')}",
+        "",
+        "## Summary Delta",
+        "",
+        f"- Keywords total delta: {diff.get('summary', {}).get('keywords_total_delta', 0)}",
+        f"- Keywords with SERP results delta: {diff.get('summary', {}).get('keywords_with_serp_results_delta', 0)}",
+        f"- Competitors tracked delta: {diff.get('summary', {}).get('competitors_tracked_delta', 0)}",
+        f"- Actions generated delta: {diff.get('summary', {}).get('actions_generated_delta', 0)}",
+        "",
+        "## Competitor Score Delta",
+        "",
+        "| Domain | Current | Previous | Delta | Current Tier | Previous Tier |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in diff.get("competitor_changes", [])[:30]:
+        lines.append(
+            f"| {row.get('domain')} | {row.get('current_score')} | {row.get('previous_score')} | {row.get('delta_score')} | "
+            f"{row.get('current_tier')} | {row.get('previous_tier')} |"
+        )
+    added = diff.get("actions", {}).get("added_keywords", [])
+    removed = diff.get("actions", {}).get("removed_keywords", [])
+    lines.extend(
+        [
+            "",
+            "## Action Keyword Changes",
+            "",
+            f"- Added: {', '.join(added[:20]) if added else '-'}",
+            f"- Removed: {', '.join(removed[:20]) if removed else '-'}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def choose_title(url: str, page: PageSignals) -> str:
@@ -2066,6 +2484,8 @@ def handle_monitor(args: argparse.Namespace) -> int:
     brand_tokens = sorted({t.lower() for t in (args.brand_token or []) + inferred_brand})
 
     keywords_path = Path(args.keywords_file).expanduser().resolve()
+    weights_file = Path(args.weights_file).expanduser().resolve() if args.weights_file else None
+    weights = load_monitor_weights(weights_file)
     keywords = read_keywords_file(keywords_path, brand_tokens=brand_tokens, max_keywords=args.max_keywords)
     report = run_monitor(
         base_url=base_url,
@@ -2076,6 +2496,7 @@ def handle_monitor(args: argparse.Namespace) -> int:
         serp_depth=args.serp_depth,
         auto_discover=args.discover_competitors,
         max_discovered=args.max_discovered,
+        weights=weights,
     )
     content = render_monitor_output(report, args.format)
 
@@ -2089,10 +2510,24 @@ def handle_monitor(args: argparse.Namespace) -> int:
     if args.history_dir:
         history_dir = Path(args.history_dir).expanduser().resolve()
         history_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         snapshot_path = history_dir / f"monitor-{normalize_domain(base_url)}-{stamp}.json"
         write_text(snapshot_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         print(f"Snapshot saved: {snapshot_path}")
+    return 0
+
+
+def handle_monitor_diff(args: argparse.Namespace) -> int:
+    current_path = Path(args.current_report).expanduser().resolve()
+    previous_path = Path(args.previous_report).expanduser().resolve()
+    diff = load_monitor_diff(current_path, previous_path)
+    body = render_monitor_diff(diff, args.format)
+    if args.output:
+        out_path = Path(args.output).expanduser().resolve()
+        write_text(out_path, body)
+        print(f"Monitor diff saved: {out_path}")
+    else:
+        sys.stdout.write(body)
     return 0
 
 
@@ -2127,6 +2562,9 @@ def handle_outreach(args: argparse.Namespace) -> int:
             min_prospect_score=args.min_prospect_score,
             min_opportunities=args.min_opportunities,
             exclude_domains=args.exclude_domain or [],
+            enrich_contacts=bool(args.enrich_contacts),
+            timeout=args.timeout,
+            user_agent=args.user_agent,
         )
 
         plan_json_path = output_dir / "outreach-plan.json"
@@ -2170,6 +2608,7 @@ def handle_outreach(args: argparse.Namespace) -> int:
             webhook_token=args.webhook_token or "",
             command_template=args.command_template or "",
             timeout=args.timeout,
+            followup_days=args.followup_days,
         )
         write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
         save_state(state_path, state)
@@ -2190,6 +2629,48 @@ def handle_outreach(args: argparse.Namespace) -> int:
             ).rstrip()
         )
         return 0 if int(run["failed"]) == 0 else 3
+
+    if action == "verify":
+        campaign = load_campaign(campaign_path)
+        summary = verify_campaign_backlinks(
+            campaign=campaign,
+            timeout=args.timeout,
+            user_agent=args.user_agent,
+            followup_days=args.followup_days,
+        )
+        write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
+        status_md_path = output_dir / "outreach-status.md"
+        write_text(status_md_path, render_campaign_status_markdown(campaign))
+        print(
+            textwrap.dedent(
+                f"""\
+                Outreach verify completed.
+                - Campaign: {campaign_path}
+                - Checked: {summary['checked']}
+                - Won: {summary['won']}
+                - Followup due: {summary['followup_due']}
+                - Unchanged: {summary['unchanged']}
+                - Status report: {status_md_path}
+                """
+            ).rstrip()
+        )
+        return 0
+
+    if action == "update":
+        if not args.domain or not args.new_status:
+            raise ValueError("domain and new-status are required for outreach update")
+        campaign = load_campaign(campaign_path)
+        ok = update_campaign_prospect_status(
+            campaign=campaign,
+            domain=args.domain,
+            new_status=args.new_status,
+            note=args.note or "",
+        )
+        if not ok:
+            raise ValueError(f"domain not found in campaign: {args.domain}")
+        write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
+        print(f"Campaign updated: {args.domain} -> {args.new_status}")
+        return 0
 
     if action == "status":
         campaign = load_campaign(campaign_path)
@@ -2266,7 +2747,7 @@ def handle_all(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="geo",
-        description="GEO LLMs Toolkit standalone CLI (scan + llms + monitor + outreach).",
+        description="GEO LLMs Toolkit standalone CLI (scan + llms + monitor + monitor-diff + outreach).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -2311,6 +2792,7 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_p.add_argument("--brand-token", action="append", help="Extra brand token(s) for brand keyword isolation.")
     monitor_p.add_argument("--serp-depth", type=int, default=10, help="SERP depth per keyword (max 50).")
     monitor_p.add_argument("--max-keywords", type=int, default=100, help="Max keywords loaded from file.")
+    monitor_p.add_argument("--weights-file", help="JSON weights file: keyword_overlap/serp_coappear/rank_pressure.")
     monitor_p.add_argument("--history-dir", default=".geo-history", help="Directory to store JSON snapshots.")
     monitor_p.add_argument("--format", choices=["markdown", "json", "csv"], default="markdown")
     monitor_p.add_argument("--output", help="Write report to a file path.")
@@ -2318,14 +2800,21 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_p.add_argument("--user-agent", default=DEFAULT_UA)
     monitor_p.set_defaults(func=handle_monitor)
 
+    monitor_diff_p = sub.add_parser("monitor-diff", help="Compare two monitor JSON reports.")
+    monitor_diff_p.add_argument("--current-report", required=True, help="Current monitor JSON report path.")
+    monitor_diff_p.add_argument("--previous-report", required=True, help="Previous monitor JSON report path.")
+    monitor_diff_p.add_argument("--format", choices=["markdown", "json", "csv"], default="markdown")
+    monitor_diff_p.add_argument("--output", help="Write diff report to a file path.")
+    monitor_diff_p.set_defaults(func=handle_monitor_diff)
+
     outreach_p = sub.add_parser(
         "outreach",
-        help="Outreach workflow: plan / run / status.",
+        help="Outreach workflow: plan / run / status / verify / update.",
     )
     outreach_p.add_argument(
         "action",
         nargs="?",
-        choices=["plan", "run", "status"],
+        choices=["plan", "run", "status", "verify", "update"],
         default="plan",
         help="Outreach action. Default: plan.",
     )
@@ -2337,6 +2826,7 @@ def build_parser() -> argparse.ArgumentParser:
     outreach_p.add_argument("--min-prospect-score", type=float, default=8.0, help="Min prospect score threshold.")
     outreach_p.add_argument("--min-opportunities", type=int, default=1, help="Min keyword opportunities per domain.")
     outreach_p.add_argument("--exclude-domain", action="append", help="Domain pattern to exclude (repeatable).")
+    outreach_p.add_argument("--enrich-contacts", action="store_true", help="Try discovering contact email/page per domain.")
     outreach_p.add_argument("--output-dir", default="./outreach-output", help="Output directory for generated files.")
     outreach_p.add_argument(
         "--campaign-file",
@@ -2353,7 +2843,7 @@ def build_parser() -> argparse.ArgumentParser:
     outreach_p.add_argument("--webhook-token", help="Bearer token for webhook authentication.")
     outreach_p.add_argument(
         "--command-template",
-        help="Command template when provider=command. Supported vars: {domain} {keyword} {pitch_url} {site_name} {email_subject}",
+        help="Command template when provider=command. Supported vars: {domain} {keyword} {pitch_url} {site_name} {email_subject} {contact_email} {contact_page}",
     )
     outreach_p.add_argument(
         "--include-existing",
@@ -2361,7 +2851,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also run prospects that were contacted within cooldown window (default is only new).",
     )
     outreach_p.add_argument("--cooldown-days", type=int, default=21, help="Skip domains contacted within this window.")
+    outreach_p.add_argument("--followup-days", type=int, default=7, help="Mark sent prospects as followup_due after this many days.")
+    outreach_p.add_argument("--domain", help="Prospect domain for `outreach update`.")
+    outreach_p.add_argument("--new-status", choices=sorted(OUTREACH_STATUSES), help="New status for `outreach update`.")
+    outreach_p.add_argument("--note", help="Optional note for `outreach update`.")
     outreach_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    outreach_p.add_argument("--user-agent", default=DEFAULT_UA)
     outreach_p.add_argument("--output", help="Write status markdown to file (used by `outreach status`).")
     outreach_p.set_defaults(func=handle_outreach)
 
