@@ -1,18 +1,34 @@
 # geo-llms-toolkit
 
-开源 GEO 工具集，包含两个可独立使用的版本：
+开源 GEO 工具集，提供两条交付路径：
 
-- **Standalone CLI（非 WordPress）**
-- **WordPress 插件（GEO LLMS Auto Regenerator）**
+- Standalone CLI（任意站点：静态站 / Shopify / 自建 CMS）
+- WordPress 插件（后台按钮化运维）
 
-## 版本选择
+## 当前版本
 
-| 版本 | 适用场景 | 入口 |
+- Standalone CLI: `0.13.0`
+- WordPress Plugin (`GEO LLMS Auto Regenerator`): `1.9.0`
+
+`1.9.0` 已补齐 WordPress 对 CLI 关键参数的对齐项（brand-token / exclude-domain / enrich-contacts / apify-allow-fallback-first）。
+
+## 能力地图
+
+- GEO 扫描：robots / sitemap / llms 端点 + SEO/GEO 信号检查
+- LLMS 生成：`llms.txt` / `llms-full.txt`
+- 竞品监控：关键词级监控、评分、优先级动作建议
+- 外联流程：plan / run / verify / status / update
+- 收录流程：discover / track / submit / audit / report
+- WordPress 安全修复：预览、应用、回滚、定时任务、通知、缓存联动
+
+## 快速选择
+
+| 版本 | 适用场景 | 文档 |
 | --- | --- | --- |
-| Standalone CLI | 任意网站（静态站/Shopify/自建 CMS） | [standalone/README.md](./standalone/README.md) |
-| WordPress 插件 | 希望在后台按钮化运行 | [adapters/wordpress/README.md](./adapters/wordpress/README.md) |
+| Standalone CLI | 你要接任意站点并用命令行自动化 | [standalone/README.md](./standalone/README.md) |
+| WordPress 插件 | 你要在 WP 后台直接操作 | [adapters/wordpress/README.md](./adapters/wordpress/README.md) |
 
-## 1) Standalone CLI 快速部署
+## Standalone CLI 快速开始
 
 ```bash
 git clone https://github.com/aronhy/geo-llms-toolkit.git
@@ -21,66 +37,76 @@ chmod +x geo
 ./geo --help
 ```
 
-最短闭环：
+最短实战链路：
 
 ```bash
 ./geo scan aronhouyu.com
 ./geo llms aronhouyu.com --output-dir ./output
 ./geo adapter-check aronhouyu.com --format markdown
 ./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --discover-competitors --output ./output/monitor.json --format json
+./geo outreach plan --monitor-report ./output/monitor.json --pitch-url https://aronhouyu.com --output-dir ./output
 ./geo index discover aronhouyu.com --output ./output/index-discover.json --format json
 ./geo index track aronhouyu.com --discover-report ./output/index-discover.json --output ./output/index-track.json --format json
 ./geo index audit aronhouyu.com --from-track-report ./output/index-track.json --output ./output/index-audit.md
 ./geo index report aronhouyu.com --history-dir ./.geo-history/index --days 30 --output ./output/index-report.md
 ```
 
-## 2) WordPress 插件快速部署
+CLI 命令组：
 
-在仓库根目录打包：
+- `scan`, `llms`, `adapter-check`, `all`
+- `monitor`, `monitor-diff`
+- `outreach (plan/run/status/verify/update)`
+- `index (discover/track/submit/audit/report)`
+
+## WordPress 插件快速开始
+
+在仓库根目录打包安装包：
 
 ```bash
 ./scripts/build-wordpress-zip.sh
 ```
 
-得到：
+生成：
 
-- `dist/geo-llms-auto-regenerator-<version>.zip`（当前为 `1.9.0`）
+- `dist/geo-llms-auto-regenerator-1.9.0.zip`
 
-安装：
+安装与初始化：
 
 1. WordPress 后台 -> `插件 -> 安装插件 -> 上传插件`
 2. 上传 ZIP 并启用 `GEO LLMS Auto Regenerator`
 3. 进入 `设置 -> GEO LLMS Auto`
-4. 先点一次：
+4. 先执行一次：
 - `立即重建 llms 文件`
 - `立即扫描 GEO`
 
-插件已内置 CLI 迁移工作台按钮：
+插件工作台支持：
 
-- `Monitor`
-- `Monitor diff`
-- `Outreach plan/run/verify/status/update`
-- `Index discover/track/submit/audit/report`
-- `模块导出（monitor/outreach/index，markdown/json/csv）`
+- Monitor / Monitor diff
+- Outreach plan/run/verify/status/update
+- Index discover/track/submit/audit/report
+- 模块导出（monitor / outreach / index，markdown/json/csv）
 
-## 3) 核心能力
+## CLI -> WordPress 对齐状态
 
-- 站点 GEO 诊断：端点、抓取、schema、noindex、软 404 等
-- LLMS 生成：`llms.txt` / `llms-full.txt`
-- 竞品监控：关键词级别评分、优先级动作建议
-- 外联闭环：计划、执行、状态、回访
-- 收录闭环：发现、跟踪、提交、审计、周报
-- WordPress 安全修复闭环：预览、应用、回滚、定时任务、通知、缓存联动
+对齐矩阵见：
 
-## 4) 文档导航
+- [docs/cli-wordpress-parity.md](./docs/cli-wordpress-parity.md)
 
-- CLI 使用与部署：[standalone/README.md](./standalone/README.md)
-- WordPress 使用与部署：[adapters/wordpress/README.md](./adapters/wordpress/README.md)
-- CLI 与 WordPress 功能对齐矩阵：[docs/cli-wordpress-parity.md](./docs/cli-wordpress-parity.md)
+重点说明：
+
+- WordPress 已覆盖 CLI 主流程与关键运营参数
+- 文件路径型参数（如 `--history-dir` / `--campaign-file`）在 WP 中改为数据库状态管理
+
+## 文档导航
+
+- CLI 文档：[standalone/README.md](./standalone/README.md)
+- WordPress 文档：[adapters/wordpress/README.md](./adapters/wordpress/README.md)
 - WordPress 详细环境配置（宝塔/Nginx/Cloudflare）：[docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
-- 外联适配说明：[docs/backlink-outreach-js-adapter.md](./docs/backlink-outreach-js-adapter.md)
+- Outreach 适配说明：[docs/backlink-outreach-js-adapter.md](./docs/backlink-outreach-js-adapter.md)
+- 迁移计划：[docs/migration-plan.md](./docs/migration-plan.md)
+- 适配器合同：[core/docs/adapter-contract.md](./core/docs/adapter-contract.md)
 
-## 5) 开发命令
+## 开发命令
 
 ```bash
 # WordPress 插件语法检查
@@ -88,14 +114,17 @@ php -l adapters/wordpress/geo-llms-auto-regenerator.php
 php -l adapters/wordpress/uninstall.php
 php -l adapters/wordpress/languages/index.php
 
+# CLI 语法检查
+python3 -m py_compile standalone/geo_toolkit.py core/python/adapter_contract.py
+
 # 重新打包 WordPress ZIP
 ./scripts/build-wordpress-zip.sh
 
 # CLI 帮助
-python3 standalone/geo_toolkit.py --help
+./geo --help
 ```
 
-## 6) 开源信息
+## 开源信息
 
 - License: `GPL-2.0-or-later`
 - Issues / PR 欢迎提交
