@@ -25,6 +25,9 @@ chmod +x geo
 # B) 生成 llms 文件
 ./geo llms aronhouyu.com --output-dir ./output
 
+# B2) 适配器合同自检（Phase3）
+./geo adapter-check aronhouyu.com --format markdown
+
 # C) 竞品监控（需要关键词文件）
 ./geo monitor aronhouyu.com \
   --keywords-file ./examples/keywords.txt \
@@ -54,6 +57,7 @@ chmod +x geo
 
 - `geo scan`: 基础 GEO/SEO 信号与端点检查
 - `geo llms`: 生成 `llms.txt` / `llms-full.txt`
+- `geo adapter-check`: 验证内置适配器是否满足 Phase3 adapter contract
 - `geo monitor`: 关键词维度竞品监控 + 优先级动作建议
 - `geo outreach plan/run/status/verify/update`: 外联计划、执行、状态跟踪、回访
 - `geo index discover/track/submit/audit/report`: 收录发现、跟踪、提交、诊断、周报

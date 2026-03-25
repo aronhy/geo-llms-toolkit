@@ -4,7 +4,7 @@ Tags: seo, llms, schema, sitemap, cloudflare
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.7.0
+Stable tag: 1.9.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -121,6 +121,26 @@ Service terms and privacy:
 
 == Changelog ==
 
+= 1.9.0 =
+
+* Completed CLI-to-WordPress parity for monitor/outreach controls:
+* Added monitor brand token settings (equivalent to CLI `--brand-token`).
+* Added outreach exclude domains settings (equivalent to CLI `--exclude-domain`).
+* Added outreach contact enrichment toggle (equivalent to CLI `--enrich-contacts`).
+* Added outreach apify fallback-first toggle (equivalent to CLI `--apify-allow-fallback-first`).
+* Wired the new controls into real plan/run pipelines and reportable configuration exports.
+
+= 1.8.0 =
+
+* Added Monitor diff export in WordPress workbench (`markdown/json/csv`).
+* Added Outreach status export and manual status update (`domain -> new status`).
+* Added Outreach provider `apify` with actor/token settings.
+* Added Outreach run controls:
+* include existing prospects within cooldown window
+* run followup_due queue
+* Added Index submit `notification type` (`URL_UPDATED` / `URL_DELETED`).
+* Added strict-search and alert settings parity in WordPress settings/workbench.
+
 = 1.7.0 =
 
 * Migrated standalone CLI core workflows into WordPress admin workbench:
@@ -176,6 +196,14 @@ Service terms and privacy:
 * Initial public release with automatic LLMS regeneration.
 
 == Upgrade Notice ==
+
+= 1.9.0 =
+
+Adds missing CLI parity controls for monitor/outreach and applies them in WordPress runtime pipelines.
+
+= 1.8.0 =
+
+Adds Phase2 CLI parity in WordPress: monitor diff, outreach status/update, apify provider, and index notification type controls.
 
 = 1.7.0 =
 

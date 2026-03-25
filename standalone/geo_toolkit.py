@@ -28,10 +28,23 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, urljoin, urlparse
 from urllib.request import Request, urlopen
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core.python.adapter_contract import (  # noqa: E402
+    AdapterActionResult,
+    AdapterFetchOptions,
+    AdapterHttpResponse,
+    AdapterPage,
+    AdapterSiteIdentity,
+    GeoAdapterContract,
+)
+
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.10.0"
+TOOL_VERSION = "0.13.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.10 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.13 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -409,6 +422,139 @@ def fetch_url(
             body="",
             error=str(e),
         )
+
+
+class StandaloneWebAdapter(GeoAdapterContract):
+    """Default web adapter implementation for standalone CLI."""
+
+    def __init__(
+        self,
+        base_url: str,
+        timeout: int,
+        user_agent: str,
+        output_dir: Optional[Path] = None,
+        extra_low_patterns: Optional[List[str]] = None,
+        webhook_url: str = "",
+        webhook_token: str = "",
+    ) -> None:
+        self.base_url = normalize_base_url(base_url)
+        self.timeout = max(1, int(timeout))
+        self.user_agent = user_agent or DEFAULT_UA
+        self.output_dir = output_dir
+        self.extra_low_patterns = extra_low_patterns or []
+        self.webhook_url = webhook_url.strip()
+        self.webhook_token = webhook_token.strip()
+
+    def get_site_identity(self) -> AdapterSiteIdentity:
+        return AdapterSiteIdentity(
+            name=normalize_domain(self.base_url),
+            url=self.base_url,
+            locale="",
+        )
+
+    def fetch(self, url: str, options: Optional[AdapterFetchOptions] = None) -> AdapterHttpResponse:
+        opts = options or AdapterFetchOptions()
+        timeout = max(1, int(opts.timeout or self.timeout))
+        user_agent = opts.user_agent or self.user_agent
+        max_bytes = max(1024, int(opts.max_bytes or 1_000_000))
+        res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=max_bytes)
+        return AdapterHttpResponse(
+            url=res.url,
+            final_url=res.final_url,
+            status=res.status,
+            headers=res.headers,
+            body=res.body,
+            error=res.error or "",
+        )
+
+    def list_high_value_pages(self, limit: int) -> List[AdapterPage]:
+        max_items = max(1, int(limit))
+        urls = collect_urls_from_sitemaps(
+            self.base_url,
+            timeout=self.timeout,
+            user_agent=self.user_agent,
+            max_urls=max(max_items * 4, 120),
+        )
+        if not urls:
+            urls = [f"{self.base_url}/"]
+
+        pages: List[AdapterPage] = []
+        seen = set()
+        for url in urls:
+            normalized = normalize_url_for_compare(url)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if is_low_value_url(url, extra_patterns=self.extra_low_patterns):
+                continue
+            pages.append(
+                AdapterPage(
+                    url=url,
+                    group=classify_index_group(url, self.base_url, extra_low_patterns=self.extra_low_patterns),
+                )
+            )
+            if len(pages) >= max_items:
+                break
+
+        if not pages:
+            homepage = f"{self.base_url}/"
+            pages.append(AdapterPage(url=homepage, group="core"))
+        return pages
+
+    def list_low_value_pages(self, limit: int) -> List[AdapterPage]:
+        max_items = max(1, int(limit))
+        urls = collect_urls_from_sitemaps(
+            self.base_url,
+            timeout=self.timeout,
+            user_agent=self.user_agent,
+            max_urls=max(max_items * 4, 120),
+        )
+        pages: List[AdapterPage] = []
+        seen = set()
+        for url in urls:
+            normalized = normalize_url_for_compare(url)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if not is_low_value_url(url, extra_patterns=self.extra_low_patterns):
+                continue
+            pages.append(AdapterPage(url=url, group="low_value"))
+            if len(pages) >= max_items:
+                break
+        return pages
+
+    def write_index_files(self, llms_text: str, llms_full_text: str) -> AdapterActionResult:
+        if self.output_dir is None:
+            return AdapterActionResult(ok=False, detail="missing_output_dir")
+        out = self.output_dir.resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        llms_path = out / "llms.txt"
+        llms_full_path = out / "llms-full.txt"
+        llms_path.write_text(llms_text, encoding="utf-8")
+        llms_full_path.write_text(llms_full_text, encoding="utf-8")
+        return AdapterActionResult(
+            ok=True,
+            detail="written",
+            meta={
+                "llms_path": str(llms_path),
+                "llms_full_path": str(llms_full_path),
+            },
+        )
+
+    def send_notification(self, payload: Dict[str, object]) -> AdapterActionResult:
+        if not self.webhook_url:
+            return AdapterActionResult(ok=False, detail="missing_webhook_url")
+        ok, detail = execute_webhook(
+            self.webhook_url,
+            self.webhook_token,
+            payload,
+            timeout=self.timeout,
+        )
+        return AdapterActionResult(ok=bool(ok), detail=detail)
+
+    def purge_cache(self, context: Dict[str, object]) -> AdapterActionResult:
+        _ = context
+        return AdapterActionResult(ok=False, detail="not_supported_in_standalone")
 
 
 def parse_html_signals(html: str) -> PageSignals:
@@ -3214,25 +3360,23 @@ def build_llms_files(
     max_items: int,
     extra_exclude: List[str],
 ) -> Dict[str, object]:
+    adapter = StandaloneWebAdapter(
+        base_url=base_url,
+        timeout=timeout,
+        user_agent=user_agent,
+        output_dir=output_dir,
+        extra_low_patterns=extra_exclude,
+    )
     sitemap_urls = collect_urls_from_sitemaps(base_url, timeout, user_agent, max_urls=max_items * 4)
-    if not sitemap_urls:
-        sitemap_urls = [f"{base_url}/"]
-
-    filtered: List[str] = []
-    for url in sitemap_urls:
-        if is_low_value_url(url, extra_patterns=extra_exclude):
-            continue
-        if url not in filtered:
-            filtered.append(url)
-        if len(filtered) >= max_items:
-            break
-
-    if not filtered:
-        filtered = [f"{base_url}/"]
+    high_value_pages = adapter.list_high_value_pages(max_items)
+    filtered = [page.url for page in high_value_pages]
 
     entries: List[Dict[str, str]] = []
     for url in filtered:
-        fetched = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=900_000)
+        fetched = adapter.fetch(
+            url,
+            AdapterFetchOptions(timeout=timeout, user_agent=user_agent, max_bytes=900_000),
+        )
         if fetched.status != 200:
             continue
         content_type = parse_content_type(fetched.headers)
@@ -3275,11 +3419,13 @@ def build_llms_files(
         if item["summary"]:
             full_lines.append(f"Summary: {item['summary']}")
         full_lines.append("")
-
-    llms_path = output_dir / "llms.txt"
-    llms_full_path = output_dir / "llms-full.txt"
-    write_text(llms_path, "\n".join(llms_lines).rstrip() + "\n")
-    write_text(llms_full_path, "\n".join(full_lines).rstrip() + "\n")
+    llms_text = "\n".join(llms_lines).rstrip() + "\n"
+    llms_full_text = "\n".join(full_lines).rstrip() + "\n"
+    write_result = adapter.write_index_files(llms_text, llms_full_text)
+    if not write_result.ok:
+        raise ValueError(f"failed to write llms files via adapter: {write_result.detail}")
+    llms_path = Path(str(write_result.meta.get("llms_path") or output_dir / "llms.txt"))
+    llms_full_path = Path(str(write_result.meta.get("llms_full_path") or output_dir / "llms-full.txt"))
 
     return {
         "base_url": base_url,
@@ -4440,6 +4586,83 @@ def handle_llms(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_adapter_check(args: argparse.Namespace) -> int:
+    base_url = normalize_base_url(args.target)
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else None
+    adapter = StandaloneWebAdapter(
+        base_url=base_url,
+        timeout=args.timeout,
+        user_agent=args.user_agent,
+        output_dir=output_dir,
+        extra_low_patterns=args.low_value_pattern or [],
+        webhook_url=args.webhook_url or "",
+        webhook_token=args.webhook_token or "",
+    )
+
+    site = adapter.get_site_identity()
+    high_pages = adapter.list_high_value_pages(args.limit)
+    low_pages = adapter.list_low_value_pages(args.limit)
+    home_resp = adapter.fetch(
+        f"{base_url}/",
+        AdapterFetchOptions(timeout=args.timeout, user_agent=args.user_agent, max_bytes=200_000),
+    )
+
+    report = {
+        "meta": {
+            "generated_at_utc": now_utc(),
+            "tool": "geo-llms-toolkit standalone-cli",
+            "version": TOOL_VERSION,
+        },
+        "site": {
+            "name": site.name,
+            "url": site.url,
+            "locale": site.locale,
+        },
+        "summary": {
+            "high_value_pages": len(high_pages),
+            "low_value_pages": len(low_pages),
+            "homepage_status": home_resp.status,
+            "homepage_content_type": parse_content_type(home_resp.headers),
+        },
+        "samples": {
+            "high_value_urls": [p.url for p in high_pages[:10]],
+            "low_value_urls": [p.url for p in low_pages[:10]],
+        },
+    }
+
+    if args.format == "json":
+        body = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    else:
+        lines = [
+            f"# Adapter Check - {site.url}",
+            "",
+            f"- Generated (UTC): {report['meta']['generated_at_utc']}",
+            f"- Site name: {site.name}",
+            f"- High value pages: {report['summary']['high_value_pages']}",
+            f"- Low value pages: {report['summary']['low_value_pages']}",
+            f"- Homepage status: {report['summary']['homepage_status']}",
+            f"- Homepage content-type: {report['summary']['homepage_content_type']}",
+            "",
+            "## High Value URLs",
+        ]
+        for url in report["samples"]["high_value_urls"]:
+            lines.append(f"- {url}")
+        lines.append("")
+        lines.append("## Low Value URLs")
+        for url in report["samples"]["low_value_urls"]:
+            lines.append(f"- {url}")
+        lines.append("")
+        body = "\n".join(lines)
+
+    if args.output:
+        out = Path(args.output).expanduser().resolve()
+        write_text(out, body)
+        print(f"Adapter check report saved: {out}")
+    else:
+        sys.stdout.write(body)
+    return 0
+
+
 def handle_all(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.target)
     output_dir = Path(args.output_dir).expanduser().resolve()
@@ -4498,6 +4721,19 @@ def build_parser() -> argparse.ArgumentParser:
     llms_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     llms_p.add_argument("--user-agent", default=DEFAULT_UA)
     llms_p.set_defaults(func=handle_llms)
+
+    adapter_check_p = sub.add_parser("adapter-check", help="Run built-in adapter contract check for a target.")
+    adapter_check_p.add_argument("target", help="Domain or URL, e.g. aronhouyu.com")
+    adapter_check_p.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    adapter_check_p.add_argument("--limit", type=int, default=20, help="Max items for high/low value listings.")
+    adapter_check_p.add_argument("--low-value-pattern", action="append", help="Extra low-value regex patterns.")
+    adapter_check_p.add_argument("--webhook-url", help="Optional webhook URL for adapter notification channel.")
+    adapter_check_p.add_argument("--webhook-token", help="Optional webhook token for adapter notification channel.")
+    adapter_check_p.add_argument("--output-dir", help="Optional output dir for adapter write-index-files checks.")
+    adapter_check_p.add_argument("--output", help="Write adapter check report to file path.")
+    adapter_check_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    adapter_check_p.add_argument("--user-agent", default=DEFAULT_UA)
+    adapter_check_p.set_defaults(func=handle_adapter_check)
 
     all_p = sub.add_parser("all", help="Run scan and generate LLMS files in one command.")
     all_p.add_argument("target", help="Domain or URL, e.g. aronhouyu.com")

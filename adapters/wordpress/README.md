@@ -9,7 +9,9 @@
 - 安全修复（预览、应用、回滚）
 - CLI 迁移工作台（后台按钮版）：
 - `Monitor`
+- `Monitor diff`
 - `Outreach plan/run/verify`
+- `Outreach status/update`
 - `Index discover/track/submit/audit/report`
 - 定时扫描、历史趋势、通知（邮件/Webhook）
 - 缓存联动（Cloudflare + 常见 WP 缓存插件）
@@ -67,6 +69,8 @@ cd /path/to/geo-llms-toolkit
 7. `Index Submit`
 8. `Index Audit`
 9. `Index Report`
+10. `Outreach 状态更新`（domain + new status）
+11. `CLI 模块导出`（monitor/outreach/index，支持 markdown/json/csv）
 
 ## 5. 关键配置项
 
@@ -74,20 +78,30 @@ cd /path/to/geo-llms-toolkit
 
 - 关键词列表（每行一个）
 - 竞品域名（可空）
+- 品牌词 Token（等价 CLI `--brand-token`）
 - SERP 深度、权重、最大关键词数
 
 ### Outreach
 
 - `pitch URL`
-- provider：`dry-run / webhook / command`
+- provider：`dry-run / webhook / command / apify`
 - webhook URL/token 或 command template
+- apify token / actor id（当 provider=apify）
+- `exclude domains`（等价 CLI `--exclude-domain`）
+- `enrich contacts`（等价 CLI `--enrich-contacts`）
+- `apify allow fallback first`（等价 CLI `--apify-allow-fallback-first`）
 - 冷却天数、follow-up 天数
+- `include_existing`（覆盖冷却去重）
+- `run_followup_due`（执行二触达队列）
 
 ### Index
 
 - URL 池上限
 - 跟踪深度
+- strict search（SERP 无精确匹配时按 not_indexed）
+- 掉索引告警（alert_on_drop + alert webhook）
 - 提交 provider：`dry-run / google-indexing / webhook / command`
+- notification type：`URL_UPDATED / URL_DELETED`
 - 提交状态过滤（默认 `not_indexed,unknown`）
 - 审计薄内容阈值、报告窗口天数
 

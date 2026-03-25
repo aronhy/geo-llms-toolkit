@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GEO LLMS Auto Regenerator
  * Description: Auto-regenerate llms.txt and llms-full.txt, scan GEO health, and apply safe fixes.
- * Version: 1.7.0
+ * Version: 1.9.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: aronhouyu
@@ -33,7 +33,7 @@ if (!defined('ABSPATH')) {
 }
 
 final class GEO_LLMS_Auto_Regenerator {
-    const VERSION = '1.7.0';
+    const VERSION = '1.9.0';
     const ADMIN_SLUG = 'geo-llms-auto';
     const EVENT_HOOK = 'geo_llms_autogen_regenerate';
     const OPTION_KEY = 'geo_llms_autogen_last_result';
@@ -82,14 +82,18 @@ final class GEO_LLMS_Auto_Regenerator {
         add_action('admin_post_geo_llms_import_settings', array(__CLASS__, 'handle_import_settings'));
         add_action('admin_post_geo_llms_clear_logs', array(__CLASS__, 'handle_clear_logs'));
         add_action('admin_post_geo_llms_run_monitor', array(__CLASS__, 'handle_run_monitor'));
+        add_action('admin_post_geo_llms_run_monitor_diff', array(__CLASS__, 'handle_run_monitor_diff'));
         add_action('admin_post_geo_llms_run_outreach_plan', array(__CLASS__, 'handle_run_outreach_plan'));
         add_action('admin_post_geo_llms_run_outreach', array(__CLASS__, 'handle_run_outreach'));
         add_action('admin_post_geo_llms_verify_outreach', array(__CLASS__, 'handle_verify_outreach'));
+        add_action('admin_post_geo_llms_outreach_status', array(__CLASS__, 'handle_outreach_status'));
+        add_action('admin_post_geo_llms_outreach_update', array(__CLASS__, 'handle_outreach_update'));
         add_action('admin_post_geo_llms_run_index_discover', array(__CLASS__, 'handle_run_index_discover'));
         add_action('admin_post_geo_llms_run_index_track', array(__CLASS__, 'handle_run_index_track'));
         add_action('admin_post_geo_llms_run_index_submit', array(__CLASS__, 'handle_run_index_submit'));
         add_action('admin_post_geo_llms_run_index_audit', array(__CLASS__, 'handle_run_index_audit'));
         add_action('admin_post_geo_llms_run_index_report', array(__CLASS__, 'handle_run_index_report'));
+        add_action('admin_post_geo_llms_export_workbench', array(__CLASS__, 'handle_export_workbench'));
         add_action('add_meta_boxes', array(__CLASS__, 'register_meta_boxes'));
         add_action('save_post', array(__CLASS__, 'save_post_llms_meta'), 20, 2);
         add_action(self::SCAN_CRON_HOOK, array(__CLASS__, 'run_scheduled_scan'));
@@ -779,6 +783,7 @@ final class GEO_LLMS_Auto_Regenerator {
             'organization_sameas' => '',
             'monitor_keywords' => '',
             'monitor_competitors' => '',
+            'monitor_brand_tokens' => '',
             'monitor_discover_competitors' => 1,
             'monitor_serp_depth' => 10,
             'monitor_max_keywords' => 80,
@@ -796,12 +801,24 @@ final class GEO_LLMS_Auto_Regenerator {
             'outreach_max_prospects' => 30,
             'outreach_min_prospect_score' => 8,
             'outreach_min_opportunities' => 1,
+            'outreach_exclude_domains' => '',
+            'outreach_enrich_contacts' => 0,
             'outreach_cooldown_days' => 21,
             'outreach_followup_days' => 7,
+            'outreach_include_existing' => 0,
+            'outreach_run_followup_due' => 0,
+            'outreach_apify_token' => '',
+            'outreach_apify_actor_id' => 'daniil.poletaev/backlink-building-agent',
+            'outreach_apify_allow_fallback_first' => 0,
             'index_max_urls' => 220,
             'index_search_depth' => 8,
+            'index_strict_search' => 0,
             'index_long_unindexed_days' => 14,
+            'index_alert_on_drop' => 0,
+            'index_alert_webhook_url' => '',
+            'index_alert_webhook_token' => '',
             'index_submit_provider' => 'webhook',
+            'index_notification_type' => 'URL_UPDATED',
             'index_submit_status_filter' => 'not_indexed,unknown',
             'index_google_token' => '',
             'index_allow_unsupported_google_types' => 0,
@@ -870,6 +887,7 @@ final class GEO_LLMS_Auto_Regenerator {
         $settings['organization_sameas'] = self::sanitize_sameas_links(isset($input['organization_sameas']) ? $input['organization_sameas'] : '');
         $settings['monitor_keywords'] = self::sanitize_template_text(isset($input['monitor_keywords']) ? $input['monitor_keywords'] : '', true);
         $settings['monitor_competitors'] = self::sanitize_domain_lines(isset($input['monitor_competitors']) ? $input['monitor_competitors'] : '');
+        $settings['monitor_brand_tokens'] = self::sanitize_monitor_brand_token_lines(isset($input['monitor_brand_tokens']) ? $input['monitor_brand_tokens'] : '');
         $settings['monitor_discover_competitors'] = !empty($input['monitor_discover_competitors']) ? 1 : 0;
         $settings['monitor_serp_depth'] = max(5, min(50, (int) (isset($input['monitor_serp_depth']) ? $input['monitor_serp_depth'] : 10)));
         $settings['monitor_max_keywords'] = max(10, min(300, (int) (isset($input['monitor_max_keywords']) ? $input['monitor_max_keywords'] : 80)));
@@ -887,12 +905,24 @@ final class GEO_LLMS_Auto_Regenerator {
         $settings['outreach_max_prospects'] = max(5, min(200, (int) (isset($input['outreach_max_prospects']) ? $input['outreach_max_prospects'] : 30)));
         $settings['outreach_min_prospect_score'] = max(0, min(100, (int) (isset($input['outreach_min_prospect_score']) ? $input['outreach_min_prospect_score'] : 8)));
         $settings['outreach_min_opportunities'] = max(1, min(50, (int) (isset($input['outreach_min_opportunities']) ? $input['outreach_min_opportunities'] : 1)));
+        $settings['outreach_exclude_domains'] = self::sanitize_domain_lines(isset($input['outreach_exclude_domains']) ? $input['outreach_exclude_domains'] : '');
+        $settings['outreach_enrich_contacts'] = !empty($input['outreach_enrich_contacts']) ? 1 : 0;
         $settings['outreach_cooldown_days'] = max(1, min(365, (int) (isset($input['outreach_cooldown_days']) ? $input['outreach_cooldown_days'] : 21)));
         $settings['outreach_followup_days'] = max(1, min(60, (int) (isset($input['outreach_followup_days']) ? $input['outreach_followup_days'] : 7)));
+        $settings['outreach_include_existing'] = !empty($input['outreach_include_existing']) ? 1 : 0;
+        $settings['outreach_run_followup_due'] = !empty($input['outreach_run_followup_due']) ? 1 : 0;
+        $settings['outreach_apify_token'] = self::sanitize_api_token(isset($input['outreach_apify_token']) ? $input['outreach_apify_token'] : '');
+        $settings['outreach_apify_actor_id'] = self::sanitize_apify_actor_id(isset($input['outreach_apify_actor_id']) ? $input['outreach_apify_actor_id'] : 'daniil.poletaev/backlink-building-agent');
+        $settings['outreach_apify_allow_fallback_first'] = !empty($input['outreach_apify_allow_fallback_first']) ? 1 : 0;
         $settings['index_max_urls'] = max(20, min(1000, (int) (isset($input['index_max_urls']) ? $input['index_max_urls'] : 220)));
         $settings['index_search_depth'] = max(5, min(20, (int) (isset($input['index_search_depth']) ? $input['index_search_depth'] : 8)));
+        $settings['index_strict_search'] = !empty($input['index_strict_search']) ? 1 : 0;
         $settings['index_long_unindexed_days'] = max(1, min(365, (int) (isset($input['index_long_unindexed_days']) ? $input['index_long_unindexed_days'] : 14)));
+        $settings['index_alert_on_drop'] = !empty($input['index_alert_on_drop']) ? 1 : 0;
+        $settings['index_alert_webhook_url'] = self::sanitize_single_url(isset($input['index_alert_webhook_url']) ? $input['index_alert_webhook_url'] : '');
+        $settings['index_alert_webhook_token'] = self::sanitize_api_token(isset($input['index_alert_webhook_token']) ? $input['index_alert_webhook_token'] : '');
         $settings['index_submit_provider'] = self::sanitize_index_submit_provider(isset($input['index_submit_provider']) ? $input['index_submit_provider'] : 'webhook');
+        $settings['index_notification_type'] = self::sanitize_index_notification_type(isset($input['index_notification_type']) ? $input['index_notification_type'] : 'URL_UPDATED');
         $settings['index_submit_status_filter'] = self::sanitize_index_status_filter(isset($input['index_submit_status_filter']) ? $input['index_submit_status_filter'] : 'not_indexed,unknown');
         $settings['index_google_token'] = self::sanitize_api_token(isset($input['index_google_token']) ? $input['index_google_token'] : '');
         $settings['index_allow_unsupported_google_types'] = !empty($input['index_allow_unsupported_google_types']) ? 1 : 0;
@@ -975,12 +1005,35 @@ final class GEO_LLMS_Auto_Regenerator {
 
     private static function sanitize_outreach_provider($value) {
         $value = sanitize_key((string) $value);
-        return in_array($value, array('dry-run', 'webhook', 'command'), true) ? $value : 'dry-run';
+        return in_array($value, array('dry-run', 'webhook', 'command', 'apify'), true) ? $value : 'dry-run';
+    }
+
+    private static function sanitize_apify_actor_id($value) {
+        $value = trim((string) $value);
+        $value = preg_replace('/[^a-zA-Z0-9._\-\/]/', '', $value);
+        if ($value === '') {
+            return 'daniil.poletaev/backlink-building-agent';
+        }
+        return $value;
+    }
+
+    private static function get_outreach_statuses() {
+        return array('queued', 'sent', 'failed', 'skipped', 'followup_due', 'replied', 'won', 'lost');
+    }
+
+    private static function sanitize_outreach_status($value) {
+        $value = sanitize_key((string) $value);
+        return in_array($value, self::get_outreach_statuses(), true) ? $value : '';
     }
 
     private static function sanitize_index_submit_provider($value) {
         $value = sanitize_key((string) $value);
         return in_array($value, array('dry-run', 'google-indexing', 'webhook', 'command'), true) ? $value : 'webhook';
+    }
+
+    private static function sanitize_index_notification_type($value) {
+        $value = strtoupper(trim((string) $value));
+        return in_array($value, array('URL_UPDATED', 'URL_DELETED'), true) ? $value : 'URL_UPDATED';
     }
 
     private static function sanitize_index_status_filter($value) {
@@ -1085,6 +1138,45 @@ final class GEO_LLMS_Auto_Regenerator {
         }
 
         return implode("\n", $clean);
+    }
+
+    private static function sanitize_monitor_brand_token_lines($raw) {
+        $raw = str_replace("\r", "\n", (string) $raw);
+        $parts = preg_split('/[\n,]+/', $raw);
+        $clean = array();
+
+        foreach ($parts as $part) {
+            $token = self::normalize_brand_token($part);
+            if ($token === '') {
+                continue;
+            }
+            if (!in_array($token, $clean, true)) {
+                $clean[] = $token;
+            }
+        }
+
+        return implode("\n", $clean);
+    }
+
+    private static function normalize_brand_token($value) {
+        $token = trim((string) $value);
+        if ($token === '') {
+            return '';
+        }
+        if (function_exists('mb_strtolower')) {
+            $token = mb_strtolower($token, 'UTF-8');
+        } else {
+            $token = strtolower($token);
+        }
+        $token = preg_replace('/[^\p{L}\p{N}_\-]+/u', '', $token);
+        if (!is_string($token) || $token === '') {
+            return '';
+        }
+        $len = function_exists('mb_strlen') ? mb_strlen($token, 'UTF-8') : strlen($token);
+        if ($len < 2 || $len > 64) {
+            return '';
+        }
+        return $token;
     }
 
     private static function normalize_ref_value($value) {
@@ -2199,6 +2291,12 @@ final class GEO_LLMS_Auto_Regenerator {
                         <?php submit_button('运行 Monitor', 'secondary', 'submit', false); ?>
                     </form>
                     <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_run_monitor_diff'); ?>
+                        <input type="hidden" name="action" value="geo_llms_run_monitor_diff">
+                        <input type="hidden" name="format" value="markdown">
+                        <?php submit_button('Monitor Diff (MD)', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                         <?php wp_nonce_field('geo_llms_run_outreach_plan'); ?>
                         <input type="hidden" name="action" value="geo_llms_run_outreach_plan">
                         <?php submit_button('生成 Outreach 计划', 'secondary', 'submit', false); ?>
@@ -2212,6 +2310,12 @@ final class GEO_LLMS_Auto_Regenerator {
                         <?php wp_nonce_field('geo_llms_verify_outreach'); ?>
                         <input type="hidden" name="action" value="geo_llms_verify_outreach">
                         <?php submit_button('验证 Outreach', 'secondary', 'submit', false); ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('geo_llms_outreach_status'); ?>
+                        <input type="hidden" name="action" value="geo_llms_outreach_status">
+                        <input type="hidden" name="format" value="markdown">
+                        <?php submit_button('Outreach Status (MD)', 'secondary', 'submit', false); ?>
                     </form>
                     <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                         <?php wp_nonce_field('geo_llms_run_index_discover'); ?>
@@ -2238,6 +2342,58 @@ final class GEO_LLMS_Auto_Regenerator {
                         <input type="hidden" name="action" value="geo_llms_run_index_report">
                         <?php submit_button('Index Report', 'secondary', 'submit', false); ?>
                     </form>
+                </div>
+                <div class="geo-grid">
+                    <div class="geo-metric">
+                        <strong>Outreach 状态更新</strong>
+                        <p class="geo-help">手动同步单个 prospect 的状态（queued/sent/replied/won/lost 等）。</p>
+                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                            <?php wp_nonce_field('geo_llms_outreach_update'); ?>
+                            <input type="hidden" name="action" value="geo_llms_outreach_update">
+                            <p>
+                                <label for="geo-outreach-update-domain"><strong>Domain</strong></label><br>
+                                <input id="geo-outreach-update-domain" class="regular-text code" type="text" name="domain" placeholder="example.com" required>
+                            </p>
+                            <p>
+                                <label for="geo-outreach-update-status"><strong>New Status</strong></label><br>
+                                <select id="geo-outreach-update-status" name="new_status">
+                                    <?php foreach (self::get_outreach_statuses() as $status_key) : ?>
+                                        <option value="<?php echo esc_attr($status_key); ?>"><?php echo esc_html($status_key); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </p>
+                            <p>
+                                <label for="geo-outreach-update-note"><strong>Note（可选）</strong></label><br>
+                                <input id="geo-outreach-update-note" class="regular-text" type="text" name="note" value="">
+                            </p>
+                            <?php submit_button('更新 Outreach 状态', 'secondary', 'submit', false); ?>
+                        </form>
+                    </div>
+                    <div class="geo-metric">
+                        <strong>CLI 模块导出</strong>
+                        <p class="geo-help">导出 Monitor / Outreach / Index 的工作台数据（Markdown / JSON / CSV）。</p>
+                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                            <?php wp_nonce_field('geo_llms_export_workbench'); ?>
+                            <input type="hidden" name="action" value="geo_llms_export_workbench">
+                            <p>
+                                <label for="geo-workbench-export-module"><strong>模块</strong></label><br>
+                                <select id="geo-workbench-export-module" name="module">
+                                    <option value="monitor">monitor</option>
+                                    <option value="outreach">outreach</option>
+                                    <option value="index">index</option>
+                                </select>
+                            </p>
+                            <p>
+                                <label for="geo-workbench-export-format"><strong>格式</strong></label><br>
+                                <select id="geo-workbench-export-format" name="format">
+                                    <option value="markdown">markdown</option>
+                                    <option value="json">json</option>
+                                    <option value="csv">csv</option>
+                                </select>
+                            </p>
+                            <?php submit_button('导出模块报告', 'secondary', 'submit', false); ?>
+                        </form>
+                    </div>
                 </div>
             </div>
 
@@ -2441,6 +2597,11 @@ final class GEO_LLMS_Auto_Regenerator {
                         <label for="geo-monitor-competitors"><strong>竞品域名（可选）</strong></label><br>
                         <textarea id="geo-monitor-competitors" class="geo-textarea code" name="settings[monitor_competitors]" placeholder="example.com&#10;competitor.io"><?php echo esc_textarea(isset($settings['monitor_competitors']) ? $settings['monitor_competitors'] : ''); ?></textarea>
                     </p>
+                    <p>
+                        <label for="geo-monitor-brand-tokens"><strong>品牌词 Token（可选）</strong></label><br>
+                        <textarea id="geo-monitor-brand-tokens" class="geo-textarea code" name="settings[monitor_brand_tokens]" placeholder="aronhouyu&#10;厚玉"><?php echo esc_textarea(isset($settings['monitor_brand_tokens']) ? $settings['monitor_brand_tokens'] : ''); ?></textarea>
+                    </p>
+                    <p class="geo-help">每行一个，等价 CLI `--brand-token`。用于把关键词识别为品牌词并在竞品机会计算时剔除。</p>
                     <label class="geo-checkbox">
                         <input type="checkbox" name="settings[monitor_discover_competitors]" value="1" <?php checked(!empty($settings['monitor_discover_competitors'])); ?>>
                         自动从 SERP 发现竞品
@@ -2489,6 +2650,7 @@ final class GEO_LLMS_Auto_Regenerator {
                             <option value="dry-run" <?php selected(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run', 'dry-run'); ?>>dry-run</option>
                             <option value="webhook" <?php selected(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run', 'webhook'); ?>>webhook</option>
                             <option value="command" <?php selected(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run', 'command'); ?>>command</option>
+                            <option value="apify" <?php selected(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run', 'apify'); ?>>apify</option>
                         </select>
                     </p>
                     <p>
@@ -2516,6 +2678,15 @@ final class GEO_LLMS_Auto_Regenerator {
                         <input id="geo-outreach-min-opps" type="number" min="1" max="50" name="settings[outreach_min_opportunities]" value="<?php echo esc_attr(isset($settings['outreach_min_opportunities']) ? $settings['outreach_min_opportunities'] : 1); ?>">
                     </p>
                     <p>
+                        <label for="geo-outreach-exclude-domains"><strong>排除域名（Outreach Exclude）</strong></label><br>
+                        <textarea id="geo-outreach-exclude-domains" class="geo-textarea code" name="settings[outreach_exclude_domains]" placeholder="example.com&#10;news.ycombinator.com"><?php echo esc_textarea(isset($settings['outreach_exclude_domains']) ? $settings['outreach_exclude_domains'] : ''); ?></textarea>
+                    </p>
+                    <p class="geo-help">每行一个，等价 CLI `--exclude-domain`。</p>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[outreach_enrich_contacts]" value="1" <?php checked(!empty($settings['outreach_enrich_contacts'])); ?>>
+                        自动探测联系人邮箱/联系页（等价 CLI `--enrich-contacts`）
+                    </label>
+                    <p>
                         <label for="geo-outreach-cooldown"><strong>冷却天数（only-new）</strong></label><br>
                         <input id="geo-outreach-cooldown" type="number" min="1" max="365" name="settings[outreach_cooldown_days]" value="<?php echo esc_attr(isset($settings['outreach_cooldown_days']) ? $settings['outreach_cooldown_days'] : 21); ?>">
                     </p>
@@ -2523,6 +2694,27 @@ final class GEO_LLMS_Auto_Regenerator {
                         <label for="geo-outreach-followup"><strong>Follow-up 天数</strong></label><br>
                         <input id="geo-outreach-followup" type="number" min="1" max="60" name="settings[outreach_followup_days]" value="<?php echo esc_attr(isset($settings['outreach_followup_days']) ? $settings['outreach_followup_days'] : 7); ?>">
                     </p>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[outreach_include_existing]" value="1" <?php checked(!empty($settings['outreach_include_existing'])); ?>>
+                        包含冷却期内域名（相当于 CLI `--include-existing`）
+                    </label>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[outreach_run_followup_due]" value="1" <?php checked(!empty($settings['outreach_run_followup_due'])); ?>>
+                        执行 followup_due 队列（相当于 CLI `--run-followup-due`）
+                    </label>
+                    <p>
+                        <label for="geo-outreach-apify-token"><strong>Apify Token</strong></label><br>
+                        <input id="geo-outreach-apify-token" class="regular-text code" type="password" autocomplete="new-password" name="settings[outreach_apify_token]" value="<?php echo esc_attr(isset($settings['outreach_apify_token']) ? $settings['outreach_apify_token'] : ''); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-outreach-apify-actor"><strong>Apify Actor ID</strong></label><br>
+                        <input id="geo-outreach-apify-actor" class="regular-text code" type="text" name="settings[outreach_apify_actor_id]" value="<?php echo esc_attr(isset($settings['outreach_apify_actor_id']) ? $settings['outreach_apify_actor_id'] : 'daniil.poletaev/backlink-building-agent'); ?>">
+                    </p>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[outreach_apify_allow_fallback_first]" value="1" <?php checked(!empty($settings['outreach_apify_allow_fallback_first'])); ?>>
+                        Apify 允许 fallback-first（等价 CLI `--apify-allow-fallback-first`）
+                    </label>
+                    <p class="geo-help">当执行方式为 `apify` 时，插件会把每个 prospect payload 发送到 Apify Actor run API。</p>
 
                     <h3>CLI 迁移设置：Index</h3>
                     <p>
@@ -2533,10 +2725,27 @@ final class GEO_LLMS_Auto_Regenerator {
                         <label for="geo-index-search-depth"><strong>索引检查 SERP 深度</strong></label><br>
                         <input id="geo-index-search-depth" type="number" min="5" max="20" name="settings[index_search_depth]" value="<?php echo esc_attr(isset($settings['index_search_depth']) ? $settings['index_search_depth'] : 8); ?>">
                     </p>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[index_strict_search]" value="1" <?php checked(!empty($settings['index_strict_search'])); ?>>
+                        Strict Search（SERP 有结果但无精确 URL 时，直接判定 not_indexed）
+                    </label>
                     <p>
                         <label for="geo-index-long-days"><strong>长期未收录阈值（天）</strong></label><br>
                         <input id="geo-index-long-days" type="number" min="1" max="365" name="settings[index_long_unindexed_days]" value="<?php echo esc_attr(isset($settings['index_long_unindexed_days']) ? $settings['index_long_unindexed_days'] : 14); ?>">
                     </p>
+                    <label class="geo-checkbox">
+                        <input type="checkbox" name="settings[index_alert_on_drop]" value="1" <?php checked(!empty($settings['index_alert_on_drop'])); ?>>
+                        发现掉索引时触发告警标记（用于手动/定时巡检）
+                    </label>
+                    <p>
+                        <label for="geo-index-alert-webhook-url"><strong>Index Alert Webhook URL</strong></label><br>
+                        <input id="geo-index-alert-webhook-url" class="regular-text code" type="url" name="settings[index_alert_webhook_url]" value="<?php echo esc_attr(isset($settings['index_alert_webhook_url']) ? $settings['index_alert_webhook_url'] : ''); ?>">
+                    </p>
+                    <p>
+                        <label for="geo-index-alert-webhook-token"><strong>Index Alert Webhook Token</strong></label><br>
+                        <input id="geo-index-alert-webhook-token" class="regular-text code" type="password" autocomplete="new-password" name="settings[index_alert_webhook_token]" value="<?php echo esc_attr(isset($settings['index_alert_webhook_token']) ? $settings['index_alert_webhook_token'] : ''); ?>">
+                    </p>
+                    <p class="geo-help">当出现 dropped_indexed 或 long_unindexed 时，会向该 webhook 推送告警摘要。</p>
                     <p>
                         <label for="geo-index-submit-provider"><strong>提交方式</strong></label><br>
                         <select id="geo-index-submit-provider" name="settings[index_submit_provider]">
@@ -2544,6 +2753,13 @@ final class GEO_LLMS_Auto_Regenerator {
                             <option value="google-indexing" <?php selected(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook', 'google-indexing'); ?>>google-indexing</option>
                             <option value="webhook" <?php selected(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook', 'webhook'); ?>>webhook</option>
                             <option value="command" <?php selected(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook', 'command'); ?>>command</option>
+                        </select>
+                    </p>
+                    <p>
+                        <label for="geo-index-notification-type"><strong>Notification Type</strong></label><br>
+                        <select id="geo-index-notification-type" name="settings[index_notification_type]">
+                            <option value="URL_UPDATED" <?php selected(isset($settings['index_notification_type']) ? $settings['index_notification_type'] : 'URL_UPDATED', 'URL_UPDATED'); ?>>URL_UPDATED</option>
+                            <option value="URL_DELETED" <?php selected(isset($settings['index_notification_type']) ? $settings['index_notification_type'] : 'URL_UPDATED', 'URL_DELETED'); ?>>URL_DELETED</option>
                         </select>
                     </p>
                     <p>
@@ -3221,6 +3437,36 @@ final class GEO_LLMS_Auto_Regenerator {
         exit;
     }
 
+    public static function handle_run_monitor_diff() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_run_monitor_diff');
+        $format = isset($_POST['format']) ? sanitize_key(wp_unslash($_POST['format'])) : 'markdown';
+        $current = get_option(self::MONITOR_OPTION_KEY, array());
+        $previous = self::get_previous_monitor_report_for_diff($current);
+        if (empty($current) || empty($previous)) {
+            self::set_notice('warning', 'Monitor diff 需要至少两次有效 Monitor 快照。请先连续运行两次 Monitor。');
+            wp_safe_redirect(self::get_admin_page_url());
+            exit;
+        }
+
+        $diff = self::build_monitor_diff_report($current, $previous);
+        $date = gmdate('Ymd-His');
+        if ($format === 'json') {
+            self::stream_download(
+                'geo-monitor-diff-' . $date . '.json',
+                'application/json; charset=utf-8',
+                wp_json_encode($diff, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            );
+        }
+        if ($format === 'csv') {
+            self::stream_download('geo-monitor-diff-' . $date . '.csv', 'text/csv; charset=utf-8', self::build_monitor_diff_csv($diff));
+        }
+        self::stream_download('geo-monitor-diff-' . $date . '.md', 'text/markdown; charset=utf-8', self::build_monitor_diff_markdown($diff));
+    }
+
     public static function handle_run_outreach_plan() {
         if (!current_user_can(self::get_management_capability())) {
             wp_die('Permission denied');
@@ -3231,6 +3477,88 @@ final class GEO_LLMS_Auto_Regenerator {
         $summary = isset($outreach['summary']) && is_array($outreach['summary']) ? $outreach['summary'] : array();
         $message = 'Outreach 计划已生成：Prospects ' . (int) (isset($summary['prospects_total']) ? $summary['prospects_total'] : 0) . '。';
         self::set_notice('success', $message);
+        wp_safe_redirect(self::get_admin_page_url());
+        exit;
+    }
+
+    public static function handle_outreach_status() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_outreach_status');
+        $format = isset($_POST['format']) ? sanitize_key(wp_unslash($_POST['format'])) : 'markdown';
+        $outreach = get_option(self::OUTREACH_OPTION_KEY, array());
+        if (empty($outreach['campaign']) || !is_array($outreach['campaign'])) {
+            $outreach = self::run_outreach_plan_pipeline(false, 'export-status');
+        }
+
+        $date = gmdate('Ymd-His');
+        if ($format === 'json') {
+            self::stream_download(
+                'geo-outreach-status-' . $date . '.json',
+                'application/json; charset=utf-8',
+                wp_json_encode($outreach, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            );
+        }
+        if ($format === 'csv') {
+            self::stream_download('geo-outreach-status-' . $date . '.csv', 'text/csv; charset=utf-8', self::build_outreach_status_csv($outreach));
+        }
+        self::stream_download('geo-outreach-status-' . $date . '.md', 'text/markdown; charset=utf-8', self::build_outreach_status_markdown($outreach));
+    }
+
+    public static function handle_outreach_update() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_outreach_update');
+        $domain = self::normalize_domain_value(isset($_POST['domain']) ? (string) wp_unslash($_POST['domain']) : '');
+        $new_status = self::sanitize_outreach_status(isset($_POST['new_status']) ? (string) wp_unslash($_POST['new_status']) : '');
+        $note = sanitize_text_field((string) (isset($_POST['note']) ? wp_unslash($_POST['note']) : ''));
+        if ($domain === '' || $new_status === '') {
+            self::set_notice('error', 'Outreach 状态更新失败：domain 或 new_status 无效。');
+            wp_safe_redirect(self::get_admin_page_url());
+            exit;
+        }
+
+        $outreach = get_option(self::OUTREACH_OPTION_KEY, array());
+        if (empty($outreach['campaign']) || !is_array($outreach['campaign'])) {
+            self::set_notice('warning', '尚未生成 Outreach campaign，无法更新状态。');
+            wp_safe_redirect(self::get_admin_page_url());
+            exit;
+        }
+
+        $campaign = isset($outreach['campaign']) && is_array($outreach['campaign']) ? $outreach['campaign'] : array();
+        $updated = self::update_outreach_campaign_status($campaign, $domain, $new_status, $note);
+        if (!$updated) {
+            self::set_notice('warning', 'Outreach 状态更新失败：未找到该域名 prospect。');
+            wp_safe_redirect(self::get_admin_page_url());
+            exit;
+        }
+
+        $outreach['campaign'] = $campaign;
+        $outreach['summary'] = isset($campaign['summary']) && is_array($campaign['summary']) ? $campaign['summary'] : array();
+        $outreach['time'] = current_time('mysql');
+        $outreach['trigger'] = 'manual-update';
+        update_option(self::OUTREACH_OPTION_KEY, $outreach, false);
+        self::append_history_option(
+            self::OUTREACH_HISTORY_OPTION_KEY,
+            array(
+                'time' => $outreach['time'],
+                'event' => 'status-update',
+                'trigger' => 'manual',
+                'summary' => array(
+                    'domain' => $domain,
+                    'new_status' => $new_status,
+                ),
+            )
+        );
+        self::log_event('info', 'outreach_status_updated', array(
+            'domain' => $domain,
+            'new_status' => $new_status,
+        ));
+        self::set_notice('success', 'Outreach 状态已更新：' . $domain . ' -> ' . $new_status . '。');
         wp_safe_redirect(self::get_admin_page_url());
         exit;
     }
@@ -3288,12 +3616,16 @@ final class GEO_LLMS_Auto_Regenerator {
         check_admin_referer('geo_llms_run_index_track');
         $report = self::run_index_track_pipeline(true, 'manual');
         $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
-        self::set_notice(
-            'success',
-            'Index track 完成：Indexed ' . (int) (isset($summary['indexed']) ? $summary['indexed'] : 0)
+        $changes = isset($report['changes']) && is_array($report['changes']) ? $report['changes'] : array();
+        $dropped_count = count(isset($changes['dropped_indexed']) && is_array($changes['dropped_indexed']) ? $changes['dropped_indexed'] : array());
+        $notice_type = ($dropped_count > 0 && !empty($report['meta']['alert_on_drop_triggered'])) ? 'warning' : 'success';
+        $message = 'Index track 完成：Indexed ' . (int) (isset($summary['indexed']) ? $summary['indexed'] : 0)
             . ' / Not indexed ' . (int) (isset($summary['not_indexed']) ? $summary['not_indexed'] : 0)
-            . ' / Unknown ' . (int) (isset($summary['unknown']) ? $summary['unknown'] : 0) . '。'
-        );
+            . ' / Unknown ' . (int) (isset($summary['unknown']) ? $summary['unknown'] : 0) . '。';
+        if ($dropped_count > 0) {
+            $message .= ' 检测到掉索引 URL：' . $dropped_count . '。';
+        }
+        self::set_notice($notice_type, $message);
         wp_safe_redirect(self::get_admin_page_url());
         exit;
     }
@@ -3350,15 +3682,61 @@ final class GEO_LLMS_Auto_Regenerator {
         exit;
     }
 
+    public static function handle_export_workbench() {
+        if (!current_user_can(self::get_management_capability())) {
+            wp_die('Permission denied');
+        }
+
+        check_admin_referer('geo_llms_export_workbench');
+        $module = isset($_POST['module']) ? sanitize_key(wp_unslash($_POST['module'])) : 'monitor';
+        $format = isset($_POST['format']) ? sanitize_key(wp_unslash($_POST['format'])) : 'markdown';
+        $date = gmdate('Ymd-His');
+
+        if (!in_array($module, array('monitor', 'outreach', 'index'), true)) {
+            self::set_notice('error', '导出失败：未知模块。');
+            wp_safe_redirect(self::get_admin_page_url());
+            exit;
+        }
+        if (!in_array($format, array('markdown', 'json', 'csv'), true)) {
+            $format = 'markdown';
+        }
+
+        $payload = self::build_workbench_export_payload($module);
+        if ($format === 'json') {
+            self::stream_download(
+                'geo-' . $module . '-report-' . $date . '.json',
+                'application/json; charset=utf-8',
+                wp_json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            );
+        }
+        if ($format === 'csv') {
+            self::stream_download(
+                'geo-' . $module . '-report-' . $date . '.csv',
+                'text/csv; charset=utf-8',
+                self::build_workbench_export_csv($module, $payload)
+            );
+        }
+        self::stream_download(
+            'geo-' . $module . '-report-' . $date . '.md',
+            'text/markdown; charset=utf-8',
+            self::build_workbench_export_markdown($module, $payload)
+        );
+    }
+
     private static function run_monitor_pipeline($persist = true, $trigger = 'manual') {
         $settings = self::get_settings();
         $base_url = home_url('/');
         $target_domain = self::normalize_domain_value($base_url);
+        $previous_report = get_option(self::MONITOR_OPTION_KEY, array());
+        if (!is_array($previous_report)) {
+            $previous_report = array();
+        }
         $serp_depth = max(5, min(50, (int) (isset($settings['monitor_serp_depth']) ? $settings['monitor_serp_depth'] : 10)));
         $max_keywords = max(10, min(300, (int) (isset($settings['monitor_max_keywords']) ? $settings['monitor_max_keywords'] : 80)));
         $max_discovered = max(0, min(30, (int) (isset($settings['monitor_max_discovered']) ? $settings['monitor_max_discovered'] : 8)));
         $competitors = self::parse_monitor_competitors(isset($settings['monitor_competitors']) ? $settings['monitor_competitors'] : '', $target_domain);
-        $keywords = self::parse_monitor_keywords(isset($settings['monitor_keywords']) ? $settings['monitor_keywords'] : '', $max_keywords, $target_domain);
+        $brand_tokens = self::parse_monitor_brand_tokens(isset($settings['monitor_brand_tokens']) ? $settings['monitor_brand_tokens'] : '');
+        $keywords = self::parse_monitor_keywords(isset($settings['monitor_keywords']) ? $settings['monitor_keywords'] : '', $max_keywords, $target_domain, $brand_tokens);
         $weights = self::get_monitor_weights($settings);
 
         $rows = array();
@@ -3432,6 +3810,7 @@ final class GEO_LLMS_Auto_Regenerator {
                 'provider' => 'bing-serp',
                 'generated_at' => current_time('mysql'),
                 'serp_depth' => $serp_depth,
+                'previous_generated_at' => isset($previous_report['meta']['generated_at']) ? (string) $previous_report['meta']['generated_at'] : '',
                 'weights' => $weights,
             ),
             'summary' => array(
@@ -3454,6 +3833,7 @@ final class GEO_LLMS_Auto_Regenerator {
                     'time' => $report['time'],
                     'trigger' => $trigger,
                     'summary' => $report['summary'],
+                    'snapshot' => self::compact_monitor_snapshot($report),
                 )
             );
             self::log_event('info', 'monitor_completed', array(
@@ -3742,6 +4122,33 @@ final class GEO_LLMS_Auto_Regenerator {
             'records' => $merged,
         );
 
+        $dropped_list = isset($changes['dropped_indexed']) && is_array($changes['dropped_indexed']) ? $changes['dropped_indexed'] : array();
+        $long_unindexed_list = isset($changes['long_unindexed']) && is_array($changes['long_unindexed']) ? $changes['long_unindexed'] : array();
+        $alert_webhook_url = isset($settings['index_alert_webhook_url']) ? trim((string) $settings['index_alert_webhook_url']) : '';
+        if ($persist && $alert_webhook_url !== '' && (!empty($dropped_list) || !empty($long_unindexed_list))) {
+            $alert_payload = array(
+                'event' => 'geo_index_alert',
+                'target' => home_url('/'),
+                'generated_at' => $report['time'],
+                'summary' => $summary,
+                'changes' => array(
+                    'dropped_indexed' => array_slice($dropped_list, 0, 20),
+                    'long_unindexed' => array_slice($long_unindexed_list, 0, 20),
+                ),
+            );
+            $alert_result = self::post_json_webhook(
+                $alert_webhook_url,
+                isset($settings['index_alert_webhook_token']) ? (string) $settings['index_alert_webhook_token'] : '',
+                $alert_payload,
+                20
+            );
+            $report['meta']['alert_webhook_status'] = !empty($alert_result['ok']) ? 'sent' : 'failed';
+            $report['meta']['alert_webhook_detail'] = isset($alert_result['detail']) ? (string) $alert_result['detail'] : '';
+        }
+        if ($persist && !empty($settings['index_alert_on_drop']) && !empty($dropped_list)) {
+            $report['meta']['alert_on_drop_triggered'] = 1;
+        }
+
         if ($persist) {
             $index_state['track'] = $report;
             $index_state['time'] = $report['time'];
@@ -3761,6 +4168,9 @@ final class GEO_LLMS_Auto_Regenerator {
                 'indexed' => (int) (isset($summary['indexed']) ? $summary['indexed'] : 0),
                 'not_indexed' => (int) (isset($summary['not_indexed']) ? $summary['not_indexed'] : 0),
             ));
+            if (!empty($report['meta']['alert_on_drop_triggered'])) {
+                self::log_event('warning', 'index_drop_alert_triggered', array('dropped_count' => count($dropped_list)));
+            }
         }
 
         return $report;
@@ -3780,6 +4190,7 @@ final class GEO_LLMS_Auto_Regenerator {
         $records = isset($track['records']) && is_array($track['records']) ? $track['records'] : array();
         $status_filter = self::parse_index_status_filter(isset($settings['index_submit_status_filter']) ? $settings['index_submit_status_filter'] : 'not_indexed,unknown');
         $provider = self::sanitize_index_submit_provider(isset($settings['index_submit_provider']) ? $settings['index_submit_provider'] : 'webhook');
+        $notification_type = self::sanitize_index_notification_type(isset($settings['index_notification_type']) ? $settings['index_notification_type'] : 'URL_UPDATED');
 
         $items = array();
         $submitted = 0;
@@ -3802,6 +4213,7 @@ final class GEO_LLMS_Auto_Regenerator {
                 'url' => $url,
                 'group' => isset($row['group']) ? (string) $row['group'] : 'other',
                 'provider' => $provider,
+                'type' => $notification_type,
             );
 
             if ($provider === 'dry-run') {
@@ -3813,14 +4225,14 @@ final class GEO_LLMS_Auto_Regenerator {
             }
 
             if ($provider === 'google-indexing') {
-                if (empty($settings['index_allow_unsupported_google_types']) && !self::is_google_indexing_supported_url($url)) {
+                if ($notification_type === 'URL_UPDATED' && empty($settings['index_allow_unsupported_google_types']) && !self::is_google_indexing_supported_url($url)) {
                     $entry['status'] = 'skipped';
                     $entry['detail'] = 'unsupported_for_google_indexing_api';
                     $skipped++;
                     $items[] = $entry;
                     continue;
                 }
-                $submit = self::submit_to_google_indexing_api($url, isset($settings['index_google_token']) ? (string) $settings['index_google_token'] : '');
+                $submit = self::submit_to_google_indexing_api($url, isset($settings['index_google_token']) ? (string) $settings['index_google_token'] : '', $notification_type);
                 $entry['status'] = !empty($submit['ok']) ? 'submitted' : 'failed';
                 $entry['detail'] = isset($submit['detail']) ? (string) $submit['detail'] : '';
                 if (!empty($submit['ok'])) {
@@ -3840,7 +4252,7 @@ final class GEO_LLMS_Auto_Regenerator {
                         'event' => 'geo_index_submit',
                         'target_domain' => self::normalize_domain_value(home_url('/')),
                         'url' => $url,
-                        'type' => 'URL_UPDATED',
+                        'type' => $notification_type,
                     ),
                     20
                 );
@@ -3859,7 +4271,7 @@ final class GEO_LLMS_Auto_Regenerator {
                 isset($settings['index_command_template']) ? (string) $settings['index_command_template'] : '',
                 array(
                     'url' => $url,
-                    'type' => 'URL_UPDATED',
+                    'type' => $notification_type,
                     'provider' => $provider,
                     'target_domain' => self::normalize_domain_value(home_url('/')),
                 )
@@ -3882,6 +4294,7 @@ final class GEO_LLMS_Auto_Regenerator {
                 'target_domain' => self::normalize_domain_value(home_url('/')),
                 'generated_at' => current_time('mysql'),
                 'provider' => $provider,
+                'notification_type' => $notification_type,
             ),
             'summary' => array(
                 'total' => count($items),
@@ -4253,11 +4666,27 @@ final class GEO_LLMS_Auto_Regenerator {
         return $domains;
     }
 
-    private static function parse_monitor_keywords($raw, $max_keywords, $target_domain) {
+    private static function parse_monitor_brand_tokens($raw) {
+        $raw = str_replace("\r", "\n", (string) $raw);
+        $parts = preg_split('/[\n,]+/', $raw);
+        $tokens = array();
+        foreach ((array) $parts as $part) {
+            $token = self::normalize_brand_token($part);
+            if ($token === '') {
+                continue;
+            }
+            if (!in_array($token, $tokens, true)) {
+                $tokens[] = $token;
+            }
+        }
+        return $tokens;
+    }
+
+    private static function parse_monitor_keywords($raw, $max_keywords, $target_domain, array $extra_brand_tokens = array()) {
         $lines = preg_split('/\n+/', str_replace("\r", "\n", (string) $raw));
         $keywords = array();
         $seen = array();
-        $brand_tokens = self::build_brand_tokens($target_domain);
+        $brand_tokens = self::build_brand_tokens($target_domain, $extra_brand_tokens);
 
         foreach ((array) $lines as $line) {
             $line = trim((string) $line);
@@ -4299,13 +4728,13 @@ final class GEO_LLMS_Auto_Regenerator {
             return $keywords;
         }
 
-        return self::get_monitor_fallback_keywords($max_keywords, $target_domain);
+        return self::get_monitor_fallback_keywords($max_keywords, $target_domain, $extra_brand_tokens);
     }
 
-    private static function get_monitor_fallback_keywords($max_keywords, $target_domain) {
+    private static function get_monitor_fallback_keywords($max_keywords, $target_domain, array $extra_brand_tokens = array()) {
         $keywords = array();
         $seen = array();
-        $brand_tokens = self::build_brand_tokens($target_domain);
+        $brand_tokens = self::build_brand_tokens($target_domain, $extra_brand_tokens);
 
         $posts = get_posts(array(
             'post_type' => 'post',
@@ -4380,7 +4809,7 @@ final class GEO_LLMS_Auto_Regenerator {
         return array_slice($keywords, 0, $max_keywords);
     }
 
-    private static function build_brand_tokens($target_domain) {
+    private static function build_brand_tokens($target_domain, array $extra_tokens = array()) {
         $tokens = array();
         $target_domain = strtolower((string) $target_domain);
         if ($target_domain !== '') {
@@ -4399,6 +4828,13 @@ final class GEO_LLMS_Auto_Regenerator {
             $part = trim((string) $part);
             if ($part !== '' && strlen($part) >= 2) {
                 $tokens[$part] = true;
+            }
+        }
+
+        foreach ($extra_tokens as $token) {
+            $token = strtolower(trim((string) $token));
+            if ($token !== '' && strlen($token) >= 2) {
+                $tokens[$token] = true;
             }
         }
 
@@ -4780,6 +5216,8 @@ final class GEO_LLMS_Auto_Regenerator {
         $max_prospects = max(5, min(200, (int) (isset($settings['outreach_max_prospects']) ? $settings['outreach_max_prospects'] : 30)));
         $min_score = max(0, min(100, (float) (isset($settings['outreach_min_prospect_score']) ? $settings['outreach_min_prospect_score'] : 8)));
         $min_opportunities = max(1, min(50, (int) (isset($settings['outreach_min_opportunities']) ? $settings['outreach_min_opportunities'] : 1)));
+        $enrich_contacts = !empty($settings['outreach_enrich_contacts']);
+        $excluded_domains = self::parse_monitor_competitors(isset($settings['outreach_exclude_domains']) ? $settings['outreach_exclude_domains'] : '', $target_domain);
 
         $competitor_set = array();
         foreach ($competitors as $comp) {
@@ -4790,7 +5228,11 @@ final class GEO_LLMS_Auto_Regenerator {
             }
         }
 
-        $blocked = array_merge(self::get_non_outreach_domains(), self::parse_monitor_competitors(isset($settings['monitor_competitors']) ? $settings['monitor_competitors'] : '', $target_domain));
+        $blocked = array_merge(
+            self::get_non_outreach_domains(),
+            self::parse_monitor_competitors(isset($settings['monitor_competitors']) ? $settings['monitor_competitors'] : '', $target_domain),
+            $excluded_domains
+        );
         $action_map = array();
         foreach ($actions as $action) {
             if (is_array($action) && !empty($action['keyword'])) {
@@ -4882,6 +5324,16 @@ final class GEO_LLMS_Auto_Regenerator {
                 . "Best,\n"
                 . $site_name . "\n";
 
+            $contact_email = '';
+            $contact_page = 'https://' . $domain . '/contact';
+            $contact_confidence = 0.2;
+            if ($enrich_contacts) {
+                $contact = self::discover_outreach_contact_info($domain);
+                $contact_email = isset($contact['email']) ? (string) $contact['email'] : '';
+                $contact_page = isset($contact['contact_page']) ? (string) $contact['contact_page'] : $contact_page;
+                $contact_confidence = (float) (isset($contact['confidence']) ? $contact['confidence'] : 0.2);
+            }
+
             $prospects[] = array(
                 'domain' => $domain,
                 'prospect_score' => $score,
@@ -4893,9 +5345,9 @@ final class GEO_LLMS_Auto_Regenerator {
                 'best_competitor_rank' => (int) $info['best_competitor_rank'],
                 'keywords' => $keywords_unique,
                 'outreach_angle' => "Gap keyword '" . ($gap_keyword !== '' ? $gap_keyword : 'topic') . "' where your site underperforms.",
-                'contact_email' => '',
-                'contact_page' => 'https://' . $domain . '/contact',
-                'contact_confidence' => 0.2,
+                'contact_email' => $contact_email,
+                'contact_page' => $contact_page,
+                'contact_confidence' => round($contact_confidence, 2),
                 'email_subject' => $subject,
                 'email_body' => $body,
             );
@@ -5057,6 +5509,8 @@ final class GEO_LLMS_Auto_Regenerator {
         $provider = self::sanitize_outreach_provider(isset($settings['outreach_provider']) ? $settings['outreach_provider'] : 'dry-run');
         $cooldown_days = max(1, (int) (isset($settings['outreach_cooldown_days']) ? $settings['outreach_cooldown_days'] : 21));
         $followup_days = max(1, (int) (isset($settings['outreach_followup_days']) ? $settings['outreach_followup_days'] : 7));
+        $include_existing = !empty($settings['outreach_include_existing']);
+        $run_followup_due = !empty($settings['outreach_run_followup_due']);
 
         $sent = 0;
         $failed = 0;
@@ -5073,9 +5527,15 @@ final class GEO_LLMS_Auto_Regenerator {
             $current_status = isset($p['status']) ? (string) $p['status'] : 'queued';
             $is_followup = $current_status === 'followup_due';
 
-            if (!$is_followup && self::was_outreach_sent_recently($state_records, $target_domain, $domain, $cooldown_days)) {
-                $prospects[$idx]['status'] = 'skipped';
-                $prospects[$idx]['last_error'] = 'cooldown<' . $cooldown_days . 'd';
+            if ($is_followup && !$run_followup_due) {
+                $skipped++;
+                continue;
+            }
+            if (!$include_existing && !$is_followup && self::was_outreach_sent_recently($state_records, $target_domain, $domain, $cooldown_days)) {
+                if ((string) (isset($p['status']) ? $p['status'] : '') !== 'sent') {
+                    $prospects[$idx]['status'] = 'skipped';
+                    $prospects[$idx]['last_error'] = 'cooldown<' . $cooldown_days . 'd';
+                }
                 $skipped++;
                 continue;
             }
@@ -5092,6 +5552,10 @@ final class GEO_LLMS_Auto_Regenerator {
                 'email_body' => $is_followup && !empty($p['followup_body']) ? (string) $p['followup_body'] : (isset($p['email_body']) ? (string) $p['email_body'] : ''),
                 'contact_email' => isset($p['contact_email']) ? (string) $p['contact_email'] : '',
                 'contact_page' => isset($p['contact_page']) ? (string) $p['contact_page'] : '',
+                'keywords' => isset($p['keywords']) && is_array($p['keywords']) ? array_values($p['keywords']) : array(),
+                'prospect_score' => isset($p['prospect_score']) ? (float) $p['prospect_score'] : 0,
+                'opportunities' => isset($p['opportunities']) ? (int) $p['opportunities'] : 0,
+                'allow_fallback_first' => !empty($settings['outreach_apify_allow_fallback_first']) ? 1 : 0,
             );
 
             $exec = array('ok' => false, 'detail' => 'unsupported provider');
@@ -5109,6 +5573,8 @@ final class GEO_LLMS_Auto_Regenerator {
                     isset($settings['outreach_command_template']) ? (string) $settings['outreach_command_template'] : '',
                     $payload
                 );
+            } elseif ($provider === 'apify') {
+                $exec = self::execute_apify_outreach_payload($payload, $settings);
             }
 
             $prospects[$idx]['attempts'] = (int) (isset($p['attempts']) ? $p['attempts'] : 0) + 1;
@@ -5138,6 +5604,8 @@ final class GEO_LLMS_Auto_Regenerator {
             'sent' => $sent,
             'failed' => $failed,
             'skipped' => $skipped,
+            'only_new' => $include_existing ? 0 : 1,
+            'run_followup_due' => $run_followup_due ? 1 : 0,
             'cooldown_days' => $cooldown_days,
         );
 
@@ -5281,6 +5749,84 @@ final class GEO_LLMS_Auto_Regenerator {
             . "Best,\n"
             . $site_name . "\n";
         return array($subject, $body);
+    }
+
+    private static function extract_emails_from_text($text) {
+        $text = (string) $text;
+        if ($text === '') {
+            return array();
+        }
+        $emails = array();
+        if (!preg_match_all('/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/i', $text, $matches)) {
+            return $emails;
+        }
+        foreach ($matches[0] as $item) {
+            $email = strtolower(trim((string) $item));
+            $email = trim($email, " \t\n\r\0\x0B.,;:()[]{}<>\"'");
+            if ($email === '') {
+                continue;
+            }
+            if (preg_match('/\.(png|jpg|jpeg|gif|svg)$/i', $email)) {
+                continue;
+            }
+            if (!in_array($email, $emails, true)) {
+                $emails[] = $email;
+            }
+        }
+        return $emails;
+    }
+
+    private static function discover_outreach_contact_info($domain) {
+        $domain = self::normalize_domain_value($domain);
+        if ($domain === '') {
+            return array(
+                'email' => '',
+                'contact_page' => '',
+                'confidence' => 0.0,
+                'checked_urls' => array(),
+            );
+        }
+
+        $base = 'https://' . $domain;
+        $pages = array($base . '/', $base . '/contact', $base . '/about', $base . '/write-for-us');
+        $checked = array();
+        $emails = array();
+        $contact_page = '';
+
+        foreach ($pages as $url) {
+            $resp = self::fetch_url($url, array('limit_response_size' => 1000000, 'timeout' => 20));
+            $checked[] = $url;
+            if (!empty($resp['error']) || (int) (isset($resp['status_code']) ? $resp['status_code'] : 0) !== 200) {
+                continue;
+            }
+
+            foreach (self::extract_emails_from_text(isset($resp['body']) ? (string) $resp['body'] : '') as $email) {
+                if (!in_array($email, $emails, true)) {
+                    $emails[] = $email;
+                }
+            }
+
+            if ($contact_page === '' && preg_match('#/(contact|write)#i', self::normalize_path($url))) {
+                $contact_page = $url;
+            }
+            if (!empty($emails)) {
+                break;
+            }
+        }
+
+        $confidence = 0.0;
+        if (!empty($emails)) {
+            $confidence = 0.8;
+        } elseif (!empty($checked)) {
+            $confidence = 0.2;
+        }
+
+        return array(
+            'email' => !empty($emails) ? $emails[0] : '',
+            'contact_page' => $contact_page !== '' ? $contact_page : ($base . '/contact'),
+            'confidence' => round($confidence, 2),
+            'checked_urls' => $checked,
+        );
     }
 
     private static function collect_urls_from_site_sitemaps($base_url, $max_urls) {
@@ -5564,6 +6110,7 @@ final class GEO_LLMS_Auto_Regenerator {
 
             if ($indexable) {
                 $depth = max(5, min(20, (int) (isset($settings['index_search_depth']) ? $settings['index_search_depth'] : 8)));
+                $strict_search = !empty($settings['index_strict_search']);
                 $serp = self::fetch_bing_results_for_keyword('"' . $url . '"', $depth);
                 $serp_urls = isset($serp['urls']) && is_array($serp['urls']) ? $serp['urls'] : array();
                 $search_results = count($serp_urls);
@@ -5582,7 +6129,7 @@ final class GEO_LLMS_Auto_Regenerator {
                         $status = 'unknown';
                         $reason = 'search_empty';
                     } else {
-                        $status = 'not_indexed';
+                        $status = $strict_search ? 'not_indexed' : 'unknown';
                         $reason = 'search_no_match';
                     }
                 }
@@ -5768,9 +6315,10 @@ final class GEO_LLMS_Auto_Regenerator {
         return (bool) preg_match('#/(job|jobs|career|careers|hiring|live|stream|broadcast|event|events)/#', $path);
     }
 
-    private static function submit_to_google_indexing_api($url, $token) {
+    private static function submit_to_google_indexing_api($url, $token, $notification_type = 'URL_UPDATED') {
         $url = trim((string) $url);
         $token = trim((string) $token);
+        $notification_type = self::sanitize_index_notification_type($notification_type);
         if ($url === '' || $token === '') {
             return array('ok' => false, 'detail' => 'missing_google_token_or_url');
         }
@@ -5785,7 +6333,7 @@ final class GEO_LLMS_Auto_Regenerator {
                 ),
                 'body' => wp_json_encode(array(
                     'url' => $url,
-                    'type' => 'URL_UPDATED',
+                    'type' => $notification_type,
                 ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
             )
         );
@@ -5829,6 +6377,59 @@ final class GEO_LLMS_Auto_Regenerator {
         $body = (string) wp_remote_retrieve_body($response);
         return array(
             'ok' => ($code >= 200 && $code < 300),
+            'detail' => 'HTTP ' . $code . ': ' . substr(trim($body), 0, 220),
+        );
+    }
+
+    private static function execute_apify_outreach_payload(array $payload, array $settings) {
+        $token = trim((string) (isset($settings['outreach_apify_token']) ? $settings['outreach_apify_token'] : ''));
+        if ($token === '') {
+            $env_token = getenv('APIFY_TOKEN');
+            if (is_string($env_token)) {
+                $token = trim($env_token);
+            }
+        }
+        if ($token === '') {
+            return array('ok' => false, 'detail' => 'missing_apify_token');
+        }
+
+        $actor = self::sanitize_apify_actor_id(isset($settings['outreach_apify_actor_id']) ? $settings['outreach_apify_actor_id'] : '');
+        if ($actor === '') {
+            return array('ok' => false, 'detail' => 'missing_apify_actor_id');
+        }
+
+        $actor_path = str_replace('%2F', '/', rawurlencode($actor));
+        $url = 'https://api.apify.com/v2/acts/' . $actor_path . '/runs?token=' . rawurlencode($token) . '&waitForFinish=0';
+        $response = wp_remote_post($url, array(
+            'timeout' => 25,
+            'headers' => array(
+                'Content-Type' => 'application/json; charset=utf-8',
+            ),
+            'body' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        ));
+
+        if (is_wp_error($response)) {
+            return array('ok' => false, 'detail' => $response->get_error_message());
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = (string) wp_remote_retrieve_body($response);
+        $decoded = json_decode($body, true);
+        $run_id = '';
+        if (is_array($decoded) && isset($decoded['data']) && is_array($decoded['data']) && !empty($decoded['data']['id'])) {
+            $run_id = (string) $decoded['data']['id'];
+        }
+
+        $ok = ($code >= 200 && $code < 300);
+        if ($ok) {
+            return array(
+                'ok' => true,
+                'detail' => $run_id !== '' ? ('apify_run:' . $run_id) : ('HTTP ' . $code),
+            );
+        }
+
+        return array(
+            'ok' => false,
             'detail' => 'HTTP ' . $code . ': ' . substr(trim($body), 0, 220),
         );
     }
@@ -6701,6 +7302,19 @@ final class GEO_LLMS_Auto_Regenerator {
             'cache_purge_cloudflare_api_token' => !empty($settings['cache_purge_cloudflare_api_token']) ? self::mask_secret($settings['cache_purge_cloudflare_api_token'], 4) : '',
             'included_post_types' => isset($settings['included_post_types']) ? array_values((array) $settings['included_post_types']) : array(),
             'included_term_keys' => isset($settings['included_term_keys']) ? array_values((array) $settings['included_term_keys']) : array(),
+            'monitor_brand_tokens' => isset($settings['monitor_brand_tokens']) ? (string) $settings['monitor_brand_tokens'] : '',
+            'outreach_provider' => isset($settings['outreach_provider']) ? (string) $settings['outreach_provider'] : 'dry-run',
+            'outreach_exclude_domains' => isset($settings['outreach_exclude_domains']) ? (string) $settings['outreach_exclude_domains'] : '',
+            'outreach_enrich_contacts' => !empty($settings['outreach_enrich_contacts']),
+            'outreach_include_existing' => !empty($settings['outreach_include_existing']),
+            'outreach_run_followup_due' => !empty($settings['outreach_run_followup_due']),
+            'outreach_apify_actor_id' => isset($settings['outreach_apify_actor_id']) ? (string) $settings['outreach_apify_actor_id'] : '',
+            'outreach_apify_token' => !empty($settings['outreach_apify_token']) ? self::mask_secret($settings['outreach_apify_token'], 4) : '',
+            'outreach_apify_allow_fallback_first' => !empty($settings['outreach_apify_allow_fallback_first']),
+            'index_strict_search' => !empty($settings['index_strict_search']),
+            'index_alert_on_drop' => !empty($settings['index_alert_on_drop']),
+            'index_alert_webhook_url' => isset($settings['index_alert_webhook_url']) ? (string) $settings['index_alert_webhook_url'] : '',
+            'index_notification_type' => isset($settings['index_notification_type']) ? (string) $settings['index_notification_type'] : 'URL_UPDATED',
         );
     }
 
@@ -6828,6 +7442,530 @@ final class GEO_LLMS_Auto_Regenerator {
             }
         }
 
+        rewind($handle);
+        $csv = stream_get_contents($handle);
+        fclose($handle);
+        return "\xEF\xBB\xBF" . $csv;
+    }
+
+    private static function compact_monitor_snapshot(array $report) {
+        $competitors = array();
+        $rows = isset($report['competitors']) && is_array($report['competitors']) ? $report['competitors'] : array();
+        foreach ($rows as $row) {
+            if (!is_array($row) || empty($row['domain'])) {
+                continue;
+            }
+            $competitors[] = array(
+                'domain' => (string) $row['domain'],
+                'score' => (float) (isset($row['score']) ? $row['score'] : 0),
+                'tier' => (string) (isset($row['tier']) ? $row['tier'] : 'none'),
+            );
+        }
+
+        $action_keywords = array();
+        $actions = isset($report['actions']) && is_array($report['actions']) ? $report['actions'] : array();
+        foreach ($actions as $action) {
+            if (!is_array($action) || empty($action['keyword'])) {
+                continue;
+            }
+            $keyword = (string) $action['keyword'];
+            if (!in_array($keyword, $action_keywords, true)) {
+                $action_keywords[] = $keyword;
+            }
+        }
+
+        return array(
+            'summary' => isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array(),
+            'competitors' => array_slice($competitors, 0, 80),
+            'action_keywords' => array_slice($action_keywords, 0, 80),
+        );
+    }
+
+    private static function get_previous_monitor_report_for_diff(array $current_report) {
+        $history = self::get_history_option(self::MONITOR_HISTORY_OPTION_KEY);
+        $current_time = isset($current_report['time']) ? (string) $current_report['time'] : '';
+        foreach ($history as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            if ($current_time !== '' && isset($entry['time']) && (string) $entry['time'] === $current_time) {
+                continue;
+            }
+            $report = self::build_monitor_report_from_history_entry($entry);
+            if (!empty($report)) {
+                return $report;
+            }
+        }
+        return array();
+    }
+
+    private static function build_monitor_report_from_history_entry(array $entry) {
+        $summary = isset($entry['summary']) && is_array($entry['summary']) ? $entry['summary'] : array();
+        $snapshot = isset($entry['snapshot']) && is_array($entry['snapshot']) ? $entry['snapshot'] : array();
+        if (empty($summary) && empty($snapshot)) {
+            return array();
+        }
+
+        $competitors = isset($snapshot['competitors']) && is_array($snapshot['competitors']) ? $snapshot['competitors'] : array();
+        $keywords = isset($snapshot['action_keywords']) && is_array($snapshot['action_keywords']) ? $snapshot['action_keywords'] : array();
+        $actions = array();
+        foreach ($keywords as $keyword) {
+            $actions[] = array('keyword' => (string) $keyword);
+        }
+
+        return array(
+            'time' => isset($entry['time']) ? (string) $entry['time'] : '',
+            'meta' => array(
+                'generated_at' => isset($entry['time']) ? (string) $entry['time'] : '',
+            ),
+            'summary' => $summary,
+            'competitors' => $competitors,
+            'actions' => $actions,
+        );
+    }
+
+    private static function build_monitor_diff_report(array $current, array $previous) {
+        $cur_summary = isset($current['summary']) && is_array($current['summary']) ? $current['summary'] : array();
+        $prev_summary = isset($previous['summary']) && is_array($previous['summary']) ? $previous['summary'] : array();
+        $cur_comp = self::index_monitor_competitors_by_domain(isset($current['competitors']) && is_array($current['competitors']) ? $current['competitors'] : array());
+        $prev_comp = self::index_monitor_competitors_by_domain(isset($previous['competitors']) && is_array($previous['competitors']) ? $previous['competitors'] : array());
+
+        $domains = array_values(array_unique(array_merge(array_keys($cur_comp), array_keys($prev_comp))));
+        sort($domains, SORT_STRING);
+        $changes = array();
+        foreach ($domains as $domain) {
+            $cur = isset($cur_comp[$domain]) ? $cur_comp[$domain] : array();
+            $prev = isset($prev_comp[$domain]) ? $prev_comp[$domain] : array();
+            $cur_score = (float) (isset($cur['score']) ? $cur['score'] : 0);
+            $prev_score = (float) (isset($prev['score']) ? $prev['score'] : 0);
+            $changes[] = array(
+                'domain' => $domain,
+                'current_score' => round($cur_score, 2),
+                'previous_score' => round($prev_score, 2),
+                'delta_score' => round($cur_score - $prev_score, 2),
+                'current_tier' => isset($cur['tier']) ? (string) $cur['tier'] : 'none',
+                'previous_tier' => isset($prev['tier']) ? (string) $prev['tier'] : 'none',
+            );
+        }
+        usort($changes, function ($a, $b) {
+            return (float) (isset($b['delta_score']) ? $b['delta_score'] : 0) <=> (float) (isset($a['delta_score']) ? $a['delta_score'] : 0);
+        });
+
+        $cur_keywords = self::extract_action_keywords(isset($current['actions']) && is_array($current['actions']) ? $current['actions'] : array());
+        $prev_keywords = self::extract_action_keywords(isset($previous['actions']) && is_array($previous['actions']) ? $previous['actions'] : array());
+        $added = array_values(array_diff($cur_keywords, $prev_keywords));
+        $removed = array_values(array_diff($prev_keywords, $cur_keywords));
+        sort($added, SORT_STRING);
+        sort($removed, SORT_STRING);
+
+        return array(
+            'meta' => array(
+                'generated_at' => current_time('mysql'),
+                'target' => home_url('/'),
+                'current_report_time' => isset($current['time']) ? (string) $current['time'] : (isset($current['meta']['generated_at']) ? (string) $current['meta']['generated_at'] : ''),
+                'previous_report_time' => isset($previous['time']) ? (string) $previous['time'] : (isset($previous['meta']['generated_at']) ? (string) $previous['meta']['generated_at'] : ''),
+            ),
+            'summary' => array(
+                'keywords_total_delta' => (int) (isset($cur_summary['keywords_total']) ? $cur_summary['keywords_total'] : 0) - (int) (isset($prev_summary['keywords_total']) ? $prev_summary['keywords_total'] : 0),
+                'keywords_with_serp_results_delta' => (int) (isset($cur_summary['keywords_with_serp_results']) ? $cur_summary['keywords_with_serp_results'] : 0) - (int) (isset($prev_summary['keywords_with_serp_results']) ? $prev_summary['keywords_with_serp_results'] : 0),
+                'competitors_tracked_delta' => (int) (isset($cur_summary['competitors_tracked']) ? $cur_summary['competitors_tracked'] : 0) - (int) (isset($prev_summary['competitors_tracked']) ? $prev_summary['competitors_tracked'] : 0),
+                'actions_generated_delta' => (int) (isset($cur_summary['actions_generated']) ? $cur_summary['actions_generated'] : 0) - (int) (isset($prev_summary['actions_generated']) ? $prev_summary['actions_generated'] : 0),
+            ),
+            'competitor_changes' => $changes,
+            'actions' => array(
+                'added_keywords' => $added,
+                'removed_keywords' => $removed,
+            ),
+        );
+    }
+
+    private static function index_monitor_competitors_by_domain(array $rows) {
+        $mapped = array();
+        foreach ($rows as $row) {
+            if (!is_array($row) || empty($row['domain'])) {
+                continue;
+            }
+            $mapped[(string) $row['domain']] = array(
+                'score' => (float) (isset($row['score']) ? $row['score'] : 0),
+                'tier' => (string) (isset($row['tier']) ? $row['tier'] : 'none'),
+            );
+        }
+        return $mapped;
+    }
+
+    private static function extract_action_keywords(array $actions) {
+        $keywords = array();
+        foreach ($actions as $action) {
+            if (!is_array($action) || empty($action['keyword'])) {
+                continue;
+            }
+            $keyword = (string) $action['keyword'];
+            if (!in_array($keyword, $keywords, true)) {
+                $keywords[] = $keyword;
+            }
+        }
+        return $keywords;
+    }
+
+    private static function build_monitor_diff_markdown(array $diff) {
+        $lines = array(
+            '# GEO Monitor Diff',
+            '',
+            '- Generated At: ' . (isset($diff['meta']['generated_at']) ? (string) $diff['meta']['generated_at'] : ''),
+            '- Target: ' . (isset($diff['meta']['target']) ? (string) $diff['meta']['target'] : ''),
+            '- Current Report: ' . (isset($diff['meta']['current_report_time']) ? (string) $diff['meta']['current_report_time'] : ''),
+            '- Previous Report: ' . (isset($diff['meta']['previous_report_time']) ? (string) $diff['meta']['previous_report_time'] : ''),
+            '',
+            '## Summary Delta',
+            '',
+            '- keywords_total_delta: ' . (int) (isset($diff['summary']['keywords_total_delta']) ? $diff['summary']['keywords_total_delta'] : 0),
+            '- keywords_with_serp_results_delta: ' . (int) (isset($diff['summary']['keywords_with_serp_results_delta']) ? $diff['summary']['keywords_with_serp_results_delta'] : 0),
+            '- competitors_tracked_delta: ' . (int) (isset($diff['summary']['competitors_tracked_delta']) ? $diff['summary']['competitors_tracked_delta'] : 0),
+            '- actions_generated_delta: ' . (int) (isset($diff['summary']['actions_generated_delta']) ? $diff['summary']['actions_generated_delta'] : 0),
+            '',
+            '## Competitor Score Delta',
+            '',
+            '| Domain | Current | Previous | Delta | Current Tier | Previous Tier |',
+            '| --- | ---: | ---: | ---: | --- | --- |',
+        );
+
+        $rows = isset($diff['competitor_changes']) && is_array($diff['competitor_changes']) ? $diff['competitor_changes'] : array();
+        foreach (array_slice($rows, 0, 30) as $row) {
+            $lines[] = '| ' . (isset($row['domain']) ? $row['domain'] : '')
+                . ' | ' . (isset($row['current_score']) ? $row['current_score'] : 0)
+                . ' | ' . (isset($row['previous_score']) ? $row['previous_score'] : 0)
+                . ' | ' . (isset($row['delta_score']) ? $row['delta_score'] : 0)
+                . ' | ' . (isset($row['current_tier']) ? $row['current_tier'] : 'none')
+                . ' | ' . (isset($row['previous_tier']) ? $row['previous_tier'] : 'none') . ' |';
+        }
+
+        $added = isset($diff['actions']['added_keywords']) && is_array($diff['actions']['added_keywords']) ? $diff['actions']['added_keywords'] : array();
+        $removed = isset($diff['actions']['removed_keywords']) && is_array($diff['actions']['removed_keywords']) ? $diff['actions']['removed_keywords'] : array();
+        $lines[] = '';
+        $lines[] = '## Action Keyword Changes';
+        $lines[] = '';
+        $lines[] = '- Added: ' . (!empty($added) ? implode(', ', array_slice($added, 0, 30)) : '-');
+        $lines[] = '- Removed: ' . (!empty($removed) ? implode(', ', array_slice($removed, 0, 30)) : '-');
+        $lines[] = '';
+
+        return implode("\n", $lines);
+    }
+
+    private static function build_monitor_diff_csv(array $diff) {
+        $handle = fopen('php://temp', 'r+');
+        fputcsv($handle, array('domain', 'current_score', 'previous_score', 'delta_score', 'current_tier', 'previous_tier'));
+        $rows = isset($diff['competitor_changes']) && is_array($diff['competitor_changes']) ? $diff['competitor_changes'] : array();
+        foreach ($rows as $row) {
+            fputcsv($handle, array(
+                isset($row['domain']) ? $row['domain'] : '',
+                isset($row['current_score']) ? $row['current_score'] : 0,
+                isset($row['previous_score']) ? $row['previous_score'] : 0,
+                isset($row['delta_score']) ? $row['delta_score'] : 0,
+                isset($row['current_tier']) ? $row['current_tier'] : '',
+                isset($row['previous_tier']) ? $row['previous_tier'] : '',
+            ));
+        }
+        rewind($handle);
+        $csv = stream_get_contents($handle);
+        fclose($handle);
+        return "\xEF\xBB\xBF" . $csv;
+    }
+
+    private static function update_outreach_campaign_status(array &$campaign, $domain, $new_status, $note) {
+        $domain = self::normalize_domain_value($domain);
+        $status = self::sanitize_outreach_status($new_status);
+        if ($domain === '' || $status === '') {
+            return false;
+        }
+        $prospects = isset($campaign['prospects']) && is_array($campaign['prospects']) ? $campaign['prospects'] : array();
+        $now = current_time('mysql');
+        foreach ($prospects as $idx => $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            if (self::normalize_domain_value(isset($p['domain']) ? (string) $p['domain'] : '') !== $domain) {
+                continue;
+            }
+            $prospects[$idx]['status'] = $status;
+            if ($status === 'replied') {
+                $prospects[$idx]['reply_at_utc'] = $now;
+            } elseif ($status === 'won') {
+                $prospects[$idx]['won_at_utc'] = $now;
+            } elseif ($status === 'lost') {
+                $prospects[$idx]['lost_at_utc'] = $now;
+            }
+            $prospects[$idx]['last_error'] = $note;
+            $campaign['prospects'] = $prospects;
+            self::refresh_outreach_campaign_summary($campaign);
+            $runs = isset($campaign['runs']) && is_array($campaign['runs']) ? $campaign['runs'] : array();
+            $runs[] = array(
+                'run_id' => 'run-update-' . gmdate('Ymd\THis') . '-' . wp_rand(100, 999),
+                'provider' => 'manual-update',
+                'started_at_utc' => $now,
+                'finished_at_utc' => $now,
+                'sent' => 0,
+                'failed' => 0,
+                'skipped' => 0,
+                'updated_domain' => $domain,
+                'new_status' => $status,
+            );
+            $campaign['runs'] = array_slice($runs, -60);
+            if (!isset($campaign['meta']) || !is_array($campaign['meta'])) {
+                $campaign['meta'] = array();
+            }
+            $campaign['meta']['last_run_at_utc'] = $now;
+            return true;
+        }
+        return false;
+    }
+
+    private static function build_outreach_status_markdown(array $outreach) {
+        $campaign = isset($outreach['campaign']) && is_array($outreach['campaign']) ? $outreach['campaign'] : array();
+        $meta = isset($campaign['meta']) && is_array($campaign['meta']) ? $campaign['meta'] : array();
+        $summary = isset($campaign['summary']) && is_array($campaign['summary']) ? $campaign['summary'] : array();
+        $runs = isset($campaign['runs']) && is_array($campaign['runs']) ? $campaign['runs'] : array();
+
+        $lines = array(
+            '# Outreach Campaign Status',
+            '',
+            '- Campaign: ' . (isset($meta['campaign_id']) ? (string) $meta['campaign_id'] : '-'),
+            '- Target: ' . (isset($meta['target_domain']) ? (string) $meta['target_domain'] : '-'),
+            '- Pitch URL: ' . (isset($meta['pitch_url']) ? (string) $meta['pitch_url'] : '-'),
+            '- Last Run: ' . (isset($meta['last_run_at_utc']) && $meta['last_run_at_utc'] !== '' ? (string) $meta['last_run_at_utc'] : '-'),
+            '- Prospects Total: ' . (int) (isset($summary['prospects_total']) ? $summary['prospects_total'] : 0),
+            '- Sent/Followup/Replied/Won/Lost: '
+                . (int) (isset($summary['sent']) ? $summary['sent'] : 0) . ' / '
+                . (int) (isset($summary['followup_due']) ? $summary['followup_due'] : 0) . ' / '
+                . (int) (isset($summary['replied']) ? $summary['replied'] : 0) . ' / '
+                . (int) (isset($summary['won']) ? $summary['won'] : 0) . ' / '
+                . (int) (isset($summary['lost']) ? $summary['lost'] : 0),
+            '- Failed/Skipped/Queued: '
+                . (int) (isset($summary['failed']) ? $summary['failed'] : 0) . ' / '
+                . (int) (isset($summary['skipped']) ? $summary['skipped'] : 0) . ' / '
+                . (int) (isset($summary['queued']) ? $summary['queued'] : 0),
+            '',
+            '## Recent Runs',
+            '',
+            '| Run ID | Provider | Sent | Failed | Skipped | Finished |',
+            '| --- | --- | ---: | ---: | ---: | --- |',
+        );
+
+        $recent_runs = array_slice($runs, -10);
+        foreach ($recent_runs as $run) {
+            if (!is_array($run)) {
+                continue;
+            }
+            $lines[] = '| ' . (isset($run['run_id']) ? $run['run_id'] : '-')
+                . ' | ' . (isset($run['provider']) ? $run['provider'] : '-')
+                . ' | ' . (int) (isset($run['sent']) ? $run['sent'] : 0)
+                . ' | ' . (int) (isset($run['failed']) ? $run['failed'] : 0)
+                . ' | ' . (int) (isset($run['skipped']) ? $run['skipped'] : 0)
+                . ' | ' . (isset($run['finished_at_utc']) ? $run['finished_at_utc'] : '-') . ' |';
+        }
+
+        return implode("\n", $lines) . "\n";
+    }
+
+    private static function build_outreach_status_csv(array $outreach) {
+        $campaign = isset($outreach['campaign']) && is_array($outreach['campaign']) ? $outreach['campaign'] : array();
+        $prospects = isset($campaign['prospects']) && is_array($campaign['prospects']) ? $campaign['prospects'] : array();
+        $handle = fopen('php://temp', 'r+');
+        fputcsv($handle, array(
+            'domain',
+            'status',
+            'prospect_score',
+            'opportunities',
+            'top_gap_keyword',
+            'contact_email',
+            'contact_page',
+            'attempts',
+            'followup_count',
+            'last_error',
+        ));
+        foreach ($prospects as $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            fputcsv($handle, array(
+                isset($p['domain']) ? $p['domain'] : '',
+                isset($p['status']) ? $p['status'] : '',
+                isset($p['prospect_score']) ? $p['prospect_score'] : '',
+                isset($p['opportunities']) ? $p['opportunities'] : '',
+                isset($p['top_gap_keyword']) ? $p['top_gap_keyword'] : '',
+                isset($p['contact_email']) ? $p['contact_email'] : '',
+                isset($p['contact_page']) ? $p['contact_page'] : '',
+                isset($p['attempts']) ? $p['attempts'] : 0,
+                isset($p['followup_count']) ? $p['followup_count'] : 0,
+                isset($p['last_error']) ? $p['last_error'] : '',
+            ));
+        }
+        rewind($handle);
+        $csv = stream_get_contents($handle);
+        fclose($handle);
+        return "\xEF\xBB\xBF" . $csv;
+    }
+
+    private static function build_workbench_export_payload($module) {
+        if ($module === 'monitor') {
+            $report = get_option(self::MONITOR_OPTION_KEY, array());
+            if (empty($report) || !is_array($report)) {
+                $report = self::run_monitor_pipeline(false, 'export');
+            }
+            $previous = self::get_previous_monitor_report_for_diff($report);
+            return array(
+                'module' => 'monitor',
+                'exported_at' => current_time('mysql'),
+                'site_url' => home_url('/'),
+                'report' => $report,
+                'diff' => !empty($previous) ? self::build_monitor_diff_report($report, $previous) : array(),
+                'history' => array_slice(self::get_history_option(self::MONITOR_HISTORY_OPTION_KEY), 0, 20),
+            );
+        }
+
+        if ($module === 'outreach') {
+            $outreach = get_option(self::OUTREACH_OPTION_KEY, array());
+            if ((empty($outreach['campaign']) || !is_array($outreach['campaign']))) {
+                $outreach = self::run_outreach_plan_pipeline(false, 'export');
+            }
+            return array(
+                'module' => 'outreach',
+                'exported_at' => current_time('mysql'),
+                'site_url' => home_url('/'),
+                'report' => $outreach,
+                'history' => array_slice(self::get_history_option(self::OUTREACH_HISTORY_OPTION_KEY), 0, 20),
+            );
+        }
+
+        $index_state = get_option(self::INDEX_OPTION_KEY, array());
+        if (!is_array($index_state)) {
+            $index_state = array();
+        }
+        if (empty($index_state['track']) || !is_array($index_state['track'])) {
+            $index_state['track'] = self::run_index_track_pipeline(false, 'export');
+        }
+        if (empty($index_state['report']) || !is_array($index_state['report'])) {
+            $index_state['report'] = self::run_index_report_pipeline(false, 'export');
+        }
+
+        return array(
+            'module' => 'index',
+            'exported_at' => current_time('mysql'),
+            'site_url' => home_url('/'),
+            'report' => $index_state,
+            'history' => array_slice(self::get_history_option(self::INDEX_HISTORY_OPTION_KEY), 0, 20),
+            'submit_history' => array_slice(self::get_history_option(self::INDEX_SUBMIT_HISTORY_OPTION_KEY), 0, 20),
+        );
+    }
+
+    private static function build_workbench_export_markdown($module, array $payload) {
+        if ($module === 'monitor') {
+            $report = isset($payload['report']) && is_array($payload['report']) ? $payload['report'] : array();
+            $summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+            $lines = array(
+                '# GEO Monitor Report',
+                '',
+                '- Exported At: ' . (isset($payload['exported_at']) ? (string) $payload['exported_at'] : ''),
+                '- Site URL: ' . (isset($payload['site_url']) ? (string) $payload['site_url'] : ''),
+                '- Report Time: ' . (isset($report['time']) ? (string) $report['time'] : ''),
+                '- Keywords: ' . (int) (isset($summary['keywords_total']) ? $summary['keywords_total'] : 0),
+                '- Competitors: ' . (int) (isset($summary['competitors_tracked']) ? $summary['competitors_tracked'] : 0),
+                '- Actions: ' . (int) (isset($summary['actions_generated']) ? $summary['actions_generated'] : 0),
+                '',
+            );
+            $diff = isset($payload['diff']) && is_array($payload['diff']) ? $payload['diff'] : array();
+            if (!empty($diff)) {
+                $lines[] = self::build_monitor_diff_markdown($diff);
+            }
+            return implode("\n", $lines) . "\n";
+        }
+
+        if ($module === 'outreach') {
+            $report = isset($payload['report']) && is_array($payload['report']) ? $payload['report'] : array();
+            return self::build_outreach_status_markdown($report);
+        }
+
+        $state = isset($payload['report']) && is_array($payload['report']) ? $payload['report'] : array();
+        $track = isset($state['track']) && is_array($state['track']) ? $state['track'] : array();
+        $report = isset($state['report']) && is_array($state['report']) ? $state['report'] : array();
+        $track_summary = isset($track['summary']) && is_array($track['summary']) ? $track['summary'] : array();
+        $weekly_summary = isset($report['summary']) && is_array($report['summary']) ? $report['summary'] : array();
+        $lines = array(
+            '# GEO Index Report',
+            '',
+            '- Exported At: ' . (isset($payload['exported_at']) ? (string) $payload['exported_at'] : ''),
+            '- Site URL: ' . (isset($payload['site_url']) ? (string) $payload['site_url'] : ''),
+            '- Track Time: ' . (isset($track['time']) ? (string) $track['time'] : ''),
+            '- Track Summary: Indexed ' . (int) (isset($track_summary['indexed']) ? $track_summary['indexed'] : 0)
+                . ' / Not indexed ' . (int) (isset($track_summary['not_indexed']) ? $track_summary['not_indexed'] : 0)
+                . ' / Unknown ' . (int) (isset($track_summary['unknown']) ? $track_summary['unknown'] : 0),
+            '- Current Index Rate: ' . (float) (isset($weekly_summary['current_index_rate_pct']) ? $weekly_summary['current_index_rate_pct'] : 0) . '%',
+            '- Avg Indexing Days: ' . (float) (isset($weekly_summary['avg_indexing_days']) ? $weekly_summary['avg_indexing_days'] : 0),
+            '- Deindex Rate: ' . (float) (isset($weekly_summary['deindex_rate_pct']) ? $weekly_summary['deindex_rate_pct'] : 0) . '%',
+            '- Recovery Rate: ' . (float) (isset($weekly_summary['recovery_rate_pct']) ? $weekly_summary['recovery_rate_pct'] : 0) . '%',
+            '',
+        );
+
+        $changes = isset($track['changes']) && is_array($track['changes']) ? $track['changes'] : array();
+        $dropped = isset($changes['dropped_indexed']) && is_array($changes['dropped_indexed']) ? $changes['dropped_indexed'] : array();
+        $long_unindexed = isset($changes['long_unindexed']) && is_array($changes['long_unindexed']) ? $changes['long_unindexed'] : array();
+        $lines[] = '## Track Changes';
+        $lines[] = '';
+        $lines[] = '- Dropped indexed: ' . count($dropped);
+        $lines[] = '- Long unindexed: ' . count($long_unindexed);
+        $lines[] = '';
+        return implode("\n", $lines) . "\n";
+    }
+
+    private static function build_workbench_export_csv($module, array $payload) {
+        if ($module === 'monitor') {
+            $diff = isset($payload['diff']) && is_array($payload['diff']) ? $payload['diff'] : array();
+            if (!empty($diff)) {
+                return self::build_monitor_diff_csv($diff);
+            }
+            $handle = fopen('php://temp', 'r+');
+            fputcsv($handle, array('domain', 'score', 'tier'));
+            $rows = isset($payload['report']['competitors']) && is_array($payload['report']['competitors']) ? $payload['report']['competitors'] : array();
+            foreach ($rows as $row) {
+                if (!is_array($row) || empty($row['domain'])) {
+                    continue;
+                }
+                fputcsv($handle, array(
+                    isset($row['domain']) ? $row['domain'] : '',
+                    isset($row['score']) ? $row['score'] : 0,
+                    isset($row['tier']) ? $row['tier'] : '',
+                ));
+            }
+            rewind($handle);
+            $csv = stream_get_contents($handle);
+            fclose($handle);
+            return "\xEF\xBB\xBF" . $csv;
+        }
+
+        if ($module === 'outreach') {
+            return self::build_outreach_status_csv(isset($payload['report']) && is_array($payload['report']) ? $payload['report'] : array());
+        }
+
+        $state = isset($payload['report']) && is_array($payload['report']) ? $payload['report'] : array();
+        $track = isset($state['track']) && is_array($state['track']) ? $state['track'] : array();
+        $records = isset($track['records']) && is_array($track['records']) ? $track['records'] : array();
+        $handle = fopen('php://temp', 'r+');
+        fputcsv($handle, array('url', 'group', 'status', 'reason', 'http_status', 'indexable', 'search_hit', 'search_results', 'not_indexed_age_days'));
+        foreach ($records as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            fputcsv($handle, array(
+                isset($row['url']) ? $row['url'] : '',
+                isset($row['group']) ? $row['group'] : '',
+                isset($row['status']) ? $row['status'] : '',
+                isset($row['reason']) ? $row['reason'] : '',
+                isset($row['http_status']) ? $row['http_status'] : 0,
+                !empty($row['indexable']) ? 1 : 0,
+                !empty($row['search_hit']) ? 1 : 0,
+                isset($row['search_results']) ? $row['search_results'] : 0,
+                isset($row['not_indexed_age_days']) ? $row['not_indexed_age_days'] : 0,
+            ));
+        }
         rewind($handle);
         $csv = stream_get_contents($handle);
         fclose($handle);

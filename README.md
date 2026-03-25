@@ -26,6 +26,7 @@ chmod +x geo
 ```bash
 ./geo scan aronhouyu.com
 ./geo llms aronhouyu.com --output-dir ./output
+./geo adapter-check aronhouyu.com --format markdown
 ./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --discover-competitors --output ./output/monitor.json --format json
 ./geo index discover aronhouyu.com --output ./output/index-discover.json --format json
 ./geo index track aronhouyu.com --discover-report ./output/index-discover.json --output ./output/index-track.json --format json
@@ -43,7 +44,7 @@ chmod +x geo
 
 得到：
 
-- `dist/geo-llms-auto-regenerator-1.7.0.zip`
+- `dist/geo-llms-auto-regenerator-<version>.zip`（当前为 `1.9.0`）
 
 安装：
 
@@ -57,8 +58,10 @@ chmod +x geo
 插件已内置 CLI 迁移工作台按钮：
 
 - `Monitor`
-- `Outreach plan/run/verify`
+- `Monitor diff`
+- `Outreach plan/run/verify/status/update`
 - `Index discover/track/submit/audit/report`
+- `模块导出（monitor/outreach/index，markdown/json/csv）`
 
 ## 3) 核心能力
 
@@ -73,6 +76,7 @@ chmod +x geo
 
 - CLI 使用与部署：[standalone/README.md](./standalone/README.md)
 - WordPress 使用与部署：[adapters/wordpress/README.md](./adapters/wordpress/README.md)
+- CLI 与 WordPress 功能对齐矩阵：[docs/cli-wordpress-parity.md](./docs/cli-wordpress-parity.md)
 - WordPress 详细环境配置（宝塔/Nginx/Cloudflare）：[docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
 - 外联适配说明：[docs/backlink-outreach-js-adapter.md](./docs/backlink-outreach-js-adapter.md)
 

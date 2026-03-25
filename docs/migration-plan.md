@@ -12,7 +12,7 @@
 - extract report serialization from WordPress adapter
 - extract endpoint/signal evaluation helpers into `core`
 
-## Phase 3: Adapter contract
+## Phase 3: Adapter contract (Completed baseline)
 
 Define minimal adapter interface:
 
@@ -22,6 +22,12 @@ Define minimal adapter interface:
 - `writeIndexFiles(llms, llmsFull)`
 - `sendNotification(payload)`
 - `purgeCache(context)`
+
+Delivered:
+
+- Python contract types at `core/python/adapter_contract.py`
+- Standalone implementation `StandaloneWebAdapter`
+- CLI self-check command `geo adapter-check`
 
 ## Phase 4: Shopify adapter
 

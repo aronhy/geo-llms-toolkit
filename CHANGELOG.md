@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
 
+## [0.14.0] - 2026-03-25
+
+### Added
+
+- WordPress parity additions for CLI monitor/outreach controls:
+- `monitor_brand_tokens` (`--brand-token` equivalent)
+- `outreach_exclude_domains` (`--exclude-domain` equivalent)
+- `outreach_enrich_contacts` (`--enrich-contacts` equivalent)
+- `outreach_apify_allow_fallback_first` (`--apify-allow-fallback-first` equivalent)
+- New WordPress outreach contact discovery helpers (email/contact-page probing) used during outreach plan generation when enrichment is enabled.
+
+### Changed
+
+- WordPress plugin version bumped to `1.9.0`.
+- WordPress readme (`readme.txt`) stable tag upgraded to `1.9.0`.
+
+## [0.13.0] - 2026-03-25
+
+### Added
+
+- Phase 3 adapter contract implemented in `core/python/adapter_contract.py`.
+- New standalone adapter implementation `StandaloneWebAdapter` in CLI runtime.
+- New CLI command:
+- `geo adapter-check` for contract-level self-check output (`markdown/json`).
+
+### Changed
+
+- `geo llms` now writes `llms*.txt` via adapter contract (`write_index_files`), not direct file path logic.
+- Adapter contract documentation updated from draft to implemented Phase 3 spec.
+
+## [0.12.0] - 2026-03-25
+
+### Added
+
+- WordPress Phase2 parity for CLI migration:
+- `Monitor diff` action and export (`markdown/json/csv`) in WP workbench.
+- `Outreach status` export and manual `Outreach update` action.
+- Outreach execution provider `apify` in WP settings/workbench.
+- Outreach run controls:
+- include cooldown domains (`include_existing`)
+- run `followup_due` queue
+- Index submit `notification type` setting (`URL_UPDATED` / `URL_DELETED`).
+
+### Changed
+
+- WordPress plugin version bumped to `1.8.0`.
+- WordPress readme (`readme.txt`) stable tag upgraded to `1.8.0`.
+
 ## [0.11.0] - 2026-03-25
 
 ### Added
