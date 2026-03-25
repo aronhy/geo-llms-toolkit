@@ -28,9 +28,9 @@ from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.7.0"
+TOOL_VERSION = "0.8.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.7 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.8 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -1048,6 +1048,55 @@ def execute_command(command_template: str, payload: Dict[str, object], timeout: 
         return False, str(e)
 
 
+def execute_apify_adapter(
+    payload: Dict[str, object],
+    timeout: int,
+    apify_token: str,
+    actor_id: str,
+    adapter_path: str,
+    output_dir: str,
+    allow_fallback_first: bool,
+) -> Tuple[bool, str]:
+    adapter = Path(adapter_path).expanduser().resolve()
+    if not adapter.exists():
+        return False, f"adapter script not found: {adapter}"
+
+    cmd = [
+        sys.executable,
+        str(adapter),
+        "--domain",
+        str(payload.get("domain") or ""),
+        "--keyword",
+        str(payload.get("top_gap_keyword") or ""),
+        "--pitch-url",
+        str(payload.get("pitch_url") or ""),
+        "--site-name",
+        str(payload.get("site_name") or ""),
+        "--contact-email",
+        str(payload.get("contact_email") or ""),
+        "--contact-page",
+        str(payload.get("contact_page") or ""),
+        "--actor-id",
+        actor_id,
+        "--timeout",
+        str(max(10, timeout)),
+        "--output-dir",
+        output_dir,
+    ]
+    if apify_token:
+        cmd.extend(["--apify-token", apify_token])
+    if allow_fallback_first:
+        cmd.append("--allow-fallback-first")
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(20, timeout + 10), check=False)
+        out = (proc.stdout or proc.stderr or "").strip()
+        ok = proc.returncode == 0
+        return ok, out[:280]
+    except Exception as e:
+        return False, str(e)
+
+
 def run_outreach_campaign(
     campaign: Dict[str, object],
     provider: str,
@@ -1059,6 +1108,11 @@ def run_outreach_campaign(
     command_template: str,
     timeout: int,
     followup_days: int,
+    apify_token: str,
+    apify_actor_id: str,
+    apify_adapter_path: str,
+    apify_output_dir: str,
+    apify_allow_fallback_first: bool,
 ) -> Dict[str, object]:
     prospects = campaign.get("prospects", [])
     if not isinstance(prospects, list):
@@ -1117,6 +1171,16 @@ def run_outreach_campaign(
             if not command_template:
                 raise ValueError("command-template is required when provider=command")
             ok, detail = execute_command(command_template, payload, timeout)
+        elif provider == "apify":
+            ok, detail = execute_apify_adapter(
+                payload=payload,
+                timeout=timeout,
+                apify_token=apify_token,
+                actor_id=apify_actor_id,
+                adapter_path=apify_adapter_path,
+                output_dir=apify_output_dir,
+                allow_fallback_first=apify_allow_fallback_first,
+            )
         else:
             raise ValueError(f"unsupported provider: {provider}")
 
@@ -2615,6 +2679,11 @@ def handle_outreach(args: argparse.Namespace) -> int:
             command_template=args.command_template or "",
             timeout=args.timeout,
             followup_days=args.followup_days,
+            apify_token=args.apify_token or "",
+            apify_actor_id=args.apify_actor_id,
+            apify_adapter_path=args.apify_adapter_path,
+            apify_output_dir=args.apify_output_dir,
+            apify_allow_fallback_first=bool(args.apify_allow_fallback_first),
         )
         write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
         save_state(state_path, state)
@@ -2844,13 +2913,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=".geo-history/outreach-state.json",
         help="Global state file for dedupe/cooldown between runs.",
     )
-    outreach_p.add_argument("--provider", choices=["dry-run", "webhook", "command"], default="dry-run")
+    outreach_p.add_argument("--provider", choices=["dry-run", "webhook", "command", "apify"], default="dry-run")
     outreach_p.add_argument("--webhook-url", help="Webhook endpoint when provider=webhook.")
     outreach_p.add_argument("--webhook-token", help="Bearer token for webhook authentication.")
     outreach_p.add_argument(
         "--command-template",
         help="Command template when provider=command. Vars: {domain} {keyword} {pitch_url} {site_name} {email_subject} {contact_email} {contact_page} and shell-safe *_q variants.",
     )
+    outreach_p.add_argument("--apify-token", help="APIFY token when provider=apify (or set APIFY_TOKEN env).")
+    outreach_p.add_argument("--apify-actor-id", default="daniil.poletaev/backlink-building-agent")
+    outreach_p.add_argument(
+        "--apify-adapter-path",
+        default="./scripts/backlink_outreach_adapter.py",
+        help="Adapter script path for provider=apify.",
+    )
+    outreach_p.add_argument(
+        "--apify-output-dir",
+        default="./outreach-output/apify-adapter",
+        help="Where apify adapter writes per-prospect artifacts.",
+    )
+    outreach_p.add_argument("--apify-allow-fallback-first", action="store_true")
     outreach_p.add_argument(
         "--include-existing",
         action="store_true",

@@ -124,3 +124,22 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Command template execution now supports shell-safe placeholders:
 - `{domain_q}` `{keyword_q}` `{pitch_url_q}` `{site_name_q}` `{email_subject_q}` `{contact_email_q}` `{contact_page_q}`
 - Standalone CLI version and default user-agent bumped to `0.7.0`.
+
+## [0.8.0] - 2026-03-25
+
+### Added
+
+- New built-in outreach provider:
+- `geo outreach run --provider apify`
+- provider internally runs `scripts/backlink_outreach_adapter.py` so users no longer need to pass command templates for default Apify flow
+- new provider args:
+- `--apify-token`
+- `--apify-actor-id`
+- `--apify-adapter-path`
+- `--apify-output-dir`
+- `--apify-allow-fallback-first`
+
+### Changed
+
+- Root/standalone/examples docs now include built-in `apify` provider usage.
+- Standalone CLI version and default user-agent bumped to `0.8.0`.

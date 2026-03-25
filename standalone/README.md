@@ -100,7 +100,14 @@ Outreach execution providers:
   --webhook-url https://your-automation-endpoint.example/webhook \
   --webhook-token YOUR_TOKEN
 
-# 13) Execute via command adapter (e.g. wrapper around backlink-outreach-js)
+# 13) Execute via built-in Apify provider (backlink-outreach-js adapter)
+./geo outreach run \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --provider apify \
+  --apify-token "$APIFY_TOKEN" \
+  --apify-output-dir ./output/outreach/apify
+
+# 14) Execute via custom command adapter
 ./geo outreach run \
   --campaign-file ./output/outreach/outreach-campaign.json \
   --provider command \
@@ -161,6 +168,7 @@ Optional monitor weights JSON:
 - `outreach run` providers:
 - `dry-run`: update campaign status without sending.
 - `webhook`: POST each prospect payload to your automation endpoint.
+- `apify`: built-in backlink-outreach-js adapter execution.
 - `command`: execute your command template per prospect (for custom adapters).
 - command template variables:
 - raw: `{domain}` `{keyword}` `{pitch_url}` `{site_name}` `{email_subject}` `{contact_email}` `{contact_page}`

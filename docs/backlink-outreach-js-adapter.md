@@ -6,7 +6,8 @@ This project includes a command adapter script:
 
 Use it with:
 
-- `geo outreach run --provider command`
+- `geo outreach run --provider apify` (recommended)
+- or `geo outreach run --provider command` (custom mode)
 
 The adapter calls Apify actor `daniil.poletaev/backlink-building-agent` (from `backlink-outreach-js`) and writes per-domain execution artifacts.
 
@@ -26,7 +27,17 @@ export APIFY_TOKEN=apify_api_xxx
 ./geo outreach plan --monitor-report ./output/monitor.json --pitch-url https://yourdomain.com/best-page --enrich-contacts --output-dir ./output/outreach
 ```
 
-## 3. Run with command adapter
+## 3. Run with built-in apify provider
+
+```bash
+./geo outreach run \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --provider apify \
+  --apify-token "$APIFY_TOKEN" \
+  --apify-output-dir ./output/outreach/apify
+```
+
+## 4. Optional custom command mode
 
 ```bash
 ./geo outreach run \
@@ -35,7 +46,7 @@ export APIFY_TOKEN=apify_api_xxx
   --command-template 'python3 ./scripts/backlink_outreach_adapter.py --domain {domain_q} --keyword {keyword_q} --pitch-url {pitch_url_q} --site-name {site_name_q} --contact-email {contact_email_q} --contact-page {contact_page_q} --output-dir ./output/outreach/apify'
 ```
 
-## 4. Adapter behavior
+## 5. Adapter behavior
 
 - Input source: one prospect payload from `geo outreach run`.
 - Actor request: one keyword (`top_gap_keyword`) per run.
@@ -46,7 +57,7 @@ export APIFY_TOKEN=apify_api_xxx
 - Artifacts:
 - `output/outreach/apify/apify-outreach-<domain>-<timestamp>.json`
 
-## 5. Optional flags for adapter
+## 6. Optional flags for adapter
 
 ```bash
 python3 ./scripts/backlink_outreach_adapter.py --help
@@ -60,7 +71,7 @@ Useful flags:
 - `--contact-name`: override actor `name`.
 - `--dry-run`: print payload only, no actor request.
 
-## 6. Notes
+## 7. Notes
 
 - This adapter is execution glue, not a full CRM/outreach sender.
 - For actual sending/followups, pair with:
