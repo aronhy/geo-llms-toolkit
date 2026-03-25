@@ -143,3 +143,20 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 - Root/standalone/examples docs now include built-in `apify` provider usage.
 - Standalone CLI version and default user-agent bumped to `0.8.0`.
+
+## [0.9.0] - 2026-03-25
+
+### Added
+
+- Auto second-touch support for outreach lifecycle:
+- `outreach verify` now generates:
+- `outreach-followup-sequences.md`
+- `outreach-followup.csv`
+- `outreach run --run-followup-due` can execute follow-up sends for `followup_due` prospects.
+- Follow-up content fields persisted on campaign prospects:
+- `followup_subject`, `followup_body`, `followup_count`
+
+### Changed
+
+- Built-in `apify` provider and custom command payload now support follow-up sends using follow-up templates when applicable.
+- Standalone CLI version and default user-agent bumped to `0.9.0`.

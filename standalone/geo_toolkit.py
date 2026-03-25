@@ -28,9 +28,9 @@ from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.8.0"
+TOOL_VERSION = "0.9.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.8 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.9 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -865,6 +865,9 @@ def build_campaign_from_plan(plan: Dict[str, object]) -> Dict[str, object]:
         item["last_attempt_at_utc"] = ""
         item["sent_at_utc"] = ""
         item["followup_due_at_utc"] = ""
+        item["followup_subject"] = ""
+        item["followup_body"] = ""
+        item["followup_count"] = 0
         item["reply_at_utc"] = ""
         item["won_at_utc"] = ""
         item["lost_at_utc"] = ""
@@ -1113,6 +1116,7 @@ def run_outreach_campaign(
     apify_adapter_path: str,
     apify_output_dir: str,
     apify_allow_fallback_first: bool,
+    run_followup_due: bool,
 ) -> Dict[str, object]:
     prospects = campaign.get("prospects", [])
     if not isinstance(prospects, list):
@@ -1133,8 +1137,14 @@ def run_outreach_campaign(
         domain = normalize_domain(str(p.get("domain") or ""))
         if not domain:
             continue
+        current_status = str(p.get("status") or "queued")
+        is_followup_item = current_status == "followup_due"
 
-        if only_new and was_sent_recently(state, target_domain, domain, cooldown_days):
+        if is_followup_item and not run_followup_due:
+            skipped += 1
+            continue
+
+        if only_new and (not is_followup_item) and was_sent_recently(state, target_domain, domain, cooldown_days):
             skipped += 1
             if str(p.get("status") or "") != "sent":
                 p["status"] = "skipped"
@@ -1149,8 +1159,8 @@ def run_outreach_campaign(
             "domain": domain,
             "top_gap_keyword": p.get("top_gap_keyword"),
             "top_gap_group": p.get("top_gap_group"),
-            "email_subject": p.get("email_subject"),
-            "email_body": p.get("email_body"),
+            "email_subject": p.get("followup_subject") if is_followup_item and p.get("followup_subject") else p.get("email_subject"),
+            "email_body": p.get("followup_body") if is_followup_item and p.get("followup_body") else p.get("email_body"),
             "contact_email": p.get("contact_email"),
             "contact_page": p.get("contact_page"),
             "keywords": p.get("keywords"),
@@ -1191,6 +1201,8 @@ def run_outreach_campaign(
             p["sent_at_utc"] = now_utc()
             followup_dt = datetime.now(timezone.utc).timestamp() + (max(1, followup_days) * 86400)
             p["followup_due_at_utc"] = datetime.fromtimestamp(followup_dt, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+            if is_followup_item:
+                p["followup_count"] = int(p.get("followup_count") or 0) + 1
             p["last_error"] = ""
             sent += 1
             update_state_sent(state, target_domain, domain, campaign_id, pitch_url)
@@ -1279,7 +1291,8 @@ def verify_campaign_backlinks(
     prospects = campaign.get("prospects", [])
     if not isinstance(prospects, list):
         raise ValueError("invalid campaign: prospects list missing")
-    pitch_url = str(campaign.get("meta", {}).get("pitch_url") or "")
+    campaign_meta = campaign.get("meta", {})
+    pitch_url = str(campaign_meta.get("pitch_url") or "")
     now = datetime.now(timezone.utc)
 
     checked = won = followup_due = unchanged = 0
@@ -1306,6 +1319,11 @@ def verify_campaign_backlinks(
             age_days = (now - sent_at).total_seconds() / 86400.0
             if age_days >= max(1, followup_days):
                 p["status"] = "followup_due"
+                subject, body = build_followup_content(p, campaign_meta if isinstance(campaign_meta, dict) else {})
+                p["followup_subject"] = subject
+                p["followup_body"] = body
+                if not p.get("followup_due_at_utc"):
+                    p["followup_due_at_utc"] = now_utc()
                 followup_due += 1
                 continue
         unchanged += 1
@@ -2313,6 +2331,112 @@ def to_outreach_sequences_markdown(plan: Dict[str, object]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def build_followup_content(prospect: Dict[str, object], campaign_meta: Dict[str, object]) -> Tuple[str, str]:
+    keyword = str(prospect.get("top_gap_keyword") or "this topic")
+    pitch_url = str(campaign_meta.get("pitch_url") or "")
+    site_name = str(campaign_meta.get("site_name") or campaign_meta.get("target_domain") or "")
+    subject = f"Quick follow-up: resource for {keyword}"
+    body = textwrap.dedent(
+        f"""\
+        Hi [First Name],
+
+        Quick follow-up on my previous note about your {keyword} page.
+        In case it helps your readers, here is the resource again:
+        {pitch_url}
+
+        If you'd like, I can also share a short summary version for easier inclusion.
+
+        Best,
+        {site_name}
+        """
+    ).strip()
+    return subject, body
+
+
+def to_followup_sequences_markdown(campaign: Dict[str, object], limit: int = 200) -> str:
+    meta = campaign.get("meta", {})
+    prospects = campaign.get("prospects", [])
+    lines = [
+        f"# GEO Outreach Follow-up Sequences - {meta.get('campaign_id', '-')}",
+        "",
+    ]
+    count = 0
+    for p in prospects:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("status") or "") != "followup_due":
+            continue
+        count += 1
+        if count > limit:
+            break
+        subject = str(p.get("followup_subject") or "")
+        body = str(p.get("followup_body") or "")
+        if not subject or not body:
+            subject, body = build_followup_content(p, meta if isinstance(meta, dict) else {})
+        lines.append(f"## {count}. {p.get('domain', '-')}")
+        lines.append(f"- Keyword: {p.get('top_gap_keyword', '-')}")
+        lines.append(f"- Contact: {p.get('contact_email') or p.get('contact_page') or '-'}")
+        lines.append(f"- Subject: {subject}")
+        lines.append("")
+        lines.append("```text")
+        lines.append(body)
+        lines.append("```")
+        lines.append("")
+    if count == 0:
+        lines.append("No `followup_due` prospects currently.")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def to_followup_csv(campaign: Dict[str, object], limit: int = 1000) -> str:
+    from io import StringIO
+
+    meta = campaign.get("meta", {})
+    prospects = campaign.get("prospects", [])
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "campaign_id",
+            "domain",
+            "top_gap_keyword",
+            "contact_email",
+            "contact_page",
+            "followup_count",
+            "followup_due_at_utc",
+            "subject",
+            "body",
+        ]
+    )
+    count = 0
+    for p in prospects:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("status") or "") != "followup_due":
+            continue
+        count += 1
+        if count > limit:
+            break
+        subject = str(p.get("followup_subject") or "")
+        body = str(p.get("followup_body") or "")
+        if not subject or not body:
+            subject, body = build_followup_content(p, meta if isinstance(meta, dict) else {})
+        writer.writerow(
+            [
+                meta.get("campaign_id", ""),
+                p.get("domain", ""),
+                p.get("top_gap_keyword", ""),
+                p.get("contact_email", ""),
+                p.get("contact_page", ""),
+                p.get("followup_count", 0),
+                p.get("followup_due_at_utc", ""),
+                subject,
+                body,
+            ]
+        )
+    return buf.getvalue()
+
+
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -2684,6 +2808,7 @@ def handle_outreach(args: argparse.Namespace) -> int:
             apify_adapter_path=args.apify_adapter_path,
             apify_output_dir=args.apify_output_dir,
             apify_allow_fallback_first=bool(args.apify_allow_fallback_first),
+            run_followup_due=bool(args.run_followup_due),
         )
         write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
         save_state(state_path, state)
@@ -2716,6 +2841,10 @@ def handle_outreach(args: argparse.Namespace) -> int:
         write_text(campaign_path, json.dumps(campaign, ensure_ascii=False, indent=2) + "\n")
         status_md_path = output_dir / "outreach-status.md"
         write_text(status_md_path, render_campaign_status_markdown(campaign))
+        followup_md_path = output_dir / "outreach-followup-sequences.md"
+        followup_csv_path = output_dir / "outreach-followup.csv"
+        write_text(followup_md_path, to_followup_sequences_markdown(campaign))
+        write_text(followup_csv_path, to_followup_csv(campaign))
         print(
             textwrap.dedent(
                 f"""\
@@ -2726,6 +2855,8 @@ def handle_outreach(args: argparse.Namespace) -> int:
                 - Followup due: {summary['followup_due']}
                 - Unchanged: {summary['unchanged']}
                 - Status report: {status_md_path}
+                - Followup sequences: {followup_md_path}
+                - Followup CSV: {followup_csv_path}
                 """
             ).rstrip()
         )
@@ -2937,6 +3068,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-existing",
         action="store_true",
         help="Also run prospects that were contacted within cooldown window (default is only new).",
+    )
+    outreach_p.add_argument(
+        "--run-followup-due",
+        action="store_true",
+        help="Allow sending prospects currently in followup_due status during outreach run.",
     )
     outreach_p.add_argument("--cooldown-days", type=int, default=21, help="Skip domains contacted within this window.")
     outreach_p.add_argument("--followup-days", type=int, default=7, help="Mark sent prospects as followup_due after this many days.")

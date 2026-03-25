@@ -35,6 +35,13 @@ export APIFY_TOKEN=apify_api_xxx
   --provider apify \
   --apify-token "$APIFY_TOKEN" \
   --apify-output-dir ./output/outreach/apify
+
+# send second touch for followup_due prospects
+./geo outreach run \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --provider apify \
+  --run-followup-due \
+  --apify-token "$APIFY_TOKEN"
 ```
 
 ## 4. Optional custom command mode

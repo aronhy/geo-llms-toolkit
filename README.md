@@ -59,6 +59,12 @@ chmod +x geo
   --campaign-file ./output/outreach/outreach-campaign.json \
   --followup-days 7
 
+# Send second touch for followup_due prospects
+./geo outreach run \
+  --campaign-file ./output/outreach/outreach-campaign.json \
+  --provider dry-run \
+  --run-followup-due
+
 # Execute outreach via webhook
 ./geo outreach run \
   --campaign-file ./output/outreach/outreach-campaign.json \
@@ -71,6 +77,7 @@ chmod +x geo
   --campaign-file ./output/outreach/outreach-campaign.json \
   --provider apify \
   --apify-token "$APIFY_TOKEN" \
+  --run-followup-due \
   --apify-output-dir ./output/outreach/apify
 
 # Show campaign status
@@ -91,12 +98,13 @@ WordPress adapter is still included in this repository:
 Install docs: [adapters/wordpress/readme.txt](./adapters/wordpress/readme.txt)
 Detailed setup (BT + Nginx + Cloudflare): [docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
 
-## 3) Latest updates (Standalone 0.8.0 + WordPress 1.6.0)
+## 3) Latest updates (Standalone 0.9.0 + WordPress 1.6.0)
 
 - **New CLI competitor monitor** (`geo monitor`): keyword-based competitor scoring, brand/non-brand keyword split, prioritized action list (`P0/P1/P2`), and history snapshots for weekly trend tracking.
 - **Monitor improvements**: configurable weights (`--weights-file`) and snapshot compare (`geo monitor-diff`).
 - **Outreach workflow** (`geo outreach plan/run/status/verify/update`): plan generation + campaign state + executable run layer (dry-run/webhook/command), contact enrichment, only-new strategy, cooldown dedupe, and win/followup verification.
 - **Apify built-in provider** (`--provider apify`): direct integration via `scripts/backlink_outreach_adapter.py` without hand-writing command templates.
+- **Auto second touch**: `outreach verify` now generates followup templates/CSV and `outreach run --run-followup-due` can execute second-touch sends.
 
 - **Issue-driven auto safe-fix**: regenerate missing `llms.txt` / `llms-full.txt`, enforce homepage `<link rel="llms" href="/llms.txt">`, enable low-value page `noindex`, and enable WP-layer endpoint fallback for `robots.txt` / `sitemap.xml` / `sitemap_index.xml` / `wp-sitemap.xml`.
 - **Safe-fix mode levels**: `Strict` (default, low-risk only, no H1/H2/CSS/UI structural edits) and `Balanced` (extends with fallback OG/Twitter + Schema output without changing template structure).
