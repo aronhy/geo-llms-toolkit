@@ -38,3 +38,21 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ### Changed
 
 - Root `README.md` now defaults to standalone quick start, with WordPress adapter as optional path.
+
+## [0.3.0] - 2026-03-25
+
+### Added
+
+- New standalone CLI command `monitor`:
+- keyword-file driven competitor monitoring
+- optional competitor auto-discovery from SERP
+- brand vs non-brand keyword separation
+- competitor scoring and tiering (`direct` / `potential` / `peripheral`)
+- prioritized action output (`P0` / `P1` / `P2`)
+- run snapshot persistence under `.geo-history/`
+- Added `examples/keywords.txt` for monitor command quick start.
+
+### Changed
+
+- Standalone docs and root README now include competitor monitor usage.
+- Standalone CLI version and default user-agent bumped to `0.3.0`.

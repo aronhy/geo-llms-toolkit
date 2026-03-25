@@ -20,14 +20,15 @@ from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
+TOOL_VERSION = "0.3.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.2 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.3 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -67,6 +68,28 @@ class CheckResult:
     status: str
     message: str
     details: Dict[str, object]
+
+
+@dataclass
+class KeywordItem:
+    keyword: str
+    group: str
+    value: float
+    is_brand: bool
+
+
+@dataclass
+class ActionItem:
+    keyword: str
+    group: str
+    priority: str
+    priority_score: float
+    impact_score: float
+    effort_score: float
+    target_rank: int
+    best_competitor: str
+    best_competitor_rank: int
+    recommendation: str
 
 
 class PageSignals(HTMLParser):
@@ -158,6 +181,43 @@ class PageSignals(HTMLParser):
             self._buf_jsonld.append(data)
         if self._capture_p:
             self._buf_p.append(data)
+
+
+class BingResultParser(HTMLParser):
+    """Parse basic organic result URLs from Bing SERP HTML."""
+
+    def __init__(self, max_results: int) -> None:
+        super().__init__()
+        self.max_results = max_results
+        self.urls: List[str] = []
+        self._in_algo = False
+        self._algo_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        attr = {k.lower(): (v or "") for k, v in attrs}
+        tag = tag.lower()
+        if tag == "li":
+            cls = attr.get("class", "")
+            cls_parts = {p.strip().lower() for p in cls.split()}
+            if "b_algo" in cls_parts:
+                self._in_algo = True
+                self._algo_depth = 1
+                return
+        if self._in_algo:
+            self._algo_depth += 1
+            if tag == "a":
+                href = attr.get("href", "").strip()
+                if href.startswith("http://") or href.startswith("https://"):
+                    if href not in self.urls:
+                        self.urls.append(href)
+                        if len(self.urls) >= self.max_results:
+                            self._in_algo = False
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_algo:
+            self._algo_depth -= 1
+            if self._algo_depth <= 0:
+                self._in_algo = False
 
 
 def normalize_base_url(target: str) -> str:
@@ -256,6 +316,134 @@ def parse_html_signals(html: str) -> PageSignals:
     parser.feed(html or "")
     parser.close()
     return parser
+
+
+def normalize_domain(value: str) -> str:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    host = (parsed.netloc or parsed.path).lower().strip()
+    host = re.sub(r":\d+$", "", host)
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def read_keywords_file(path: Path, brand_tokens: Sequence[str], max_keywords: int) -> List[KeywordItem]:
+    if not path.exists():
+        raise ValueError(f"keywords file does not exist: {path}")
+
+    rows: List[KeywordItem] = []
+    suffix = path.suffix.lower()
+    if suffix in {".csv", ".tsv"}:
+        delimiter = "," if suffix == ".csv" else "\t"
+        with path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
+            if not reader.fieldnames or "keyword" not in [h.lower() for h in reader.fieldnames]:
+                raise ValueError("keywords csv/tsv requires a 'keyword' column")
+            normalized_map = {h.lower(): h for h in reader.fieldnames}
+            k_col = normalized_map["keyword"]
+            g_col = normalized_map.get("group")
+            v_col = normalized_map.get("value")
+            for row in reader:
+                kw = (row.get(k_col) or "").strip()
+                if not kw:
+                    continue
+                grp = (row.get(g_col) or "default").strip() if g_col else "default"
+                raw_value = (row.get(v_col) or "").strip() if v_col else ""
+                try:
+                    value = float(raw_value) if raw_value else 1.0
+                except ValueError:
+                    value = 1.0
+                rows.append(
+                    KeywordItem(
+                        keyword=kw,
+                        group=grp or "default",
+                        value=value,
+                        is_brand=is_brand_keyword(kw, brand_tokens),
+                    )
+                )
+                if len(rows) >= max_keywords:
+                    break
+    else:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                kw = line.strip()
+                if not kw or kw.startswith("#"):
+                    continue
+                rows.append(
+                    KeywordItem(
+                        keyword=kw,
+                        group="default",
+                        value=1.0,
+                        is_brand=is_brand_keyword(kw, brand_tokens),
+                    )
+                )
+                if len(rows) >= max_keywords:
+                    break
+
+    if not rows:
+        raise ValueError("no keywords loaded from file")
+    return rows
+
+
+def is_brand_keyword(keyword: str, brand_tokens: Sequence[str]) -> bool:
+    kw = keyword.lower()
+    return any(token and token in kw for token in brand_tokens)
+
+
+def fetch_bing_results(keyword: str, depth: int, timeout: int, user_agent: str) -> List[str]:
+    url = f"https://www.bing.com/search?q={quote_plus(keyword)}&count={max(10, min(depth, 50))}"
+    res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=2_000_000)
+    if res.status != 200:
+        return []
+    if "html" not in parse_content_type(res.headers):
+        return []
+    parser = BingResultParser(max_results=depth)
+    parser.feed(res.body or "")
+    parser.close()
+    cleaned: List[str] = []
+    for raw in parser.urls:
+        p = urlparse(raw)
+        host = p.netloc.lower()
+        if not host or host.endswith("bing.com"):
+            continue
+        cleaned.append(raw)
+        if len(cleaned) >= depth:
+            break
+    return cleaned
+
+
+def percentile(values: List[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    sorted_values = sorted(values)
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    pos = (len(sorted_values) - 1) * pct
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = pos - lo
+    return sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac
+
+
+def classify_competitor_tier(score: float, p50: float, p80: float) -> str:
+    if score <= 0:
+        return "peripheral"
+    if score >= p80:
+        return "direct"
+    if score >= p50:
+        return "potential"
+    return "peripheral"
+
+
+def calc_priority(impact_score: float, effort_score: float) -> Tuple[str, float]:
+    priority_score = (impact_score * 0.65) + ((100.0 - effort_score) * 0.35)
+    if priority_score >= 75:
+        label = "P0"
+    elif priority_score >= 55:
+        label = "P1"
+    else:
+        label = "P2"
+    return label, round(priority_score, 2)
 
 
 def parse_jsonld_blocks(blocks: Iterable[str]) -> List[Dict[str, object]]:
@@ -742,7 +930,7 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
             "target": base_url,
             "generated_at_utc": now_utc(),
             "tool": "geo-llms-toolkit standalone-cli",
-            "version": "0.2.0",
+            "version": TOOL_VERSION,
         },
         "summary": {
             "overall": overall,
@@ -752,6 +940,225 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
             "total": len(checks),
         },
         "checks": [asdict(c) for c in checks],
+    }
+
+
+def run_monitor(
+    base_url: str,
+    keywords: List[KeywordItem],
+    competitors: List[str],
+    timeout: int,
+    user_agent: str,
+    serp_depth: int,
+    auto_discover: bool,
+    max_discovered: int,
+) -> Dict[str, object]:
+    target_domain = normalize_domain(base_url)
+    provided_competitors: List[str] = []
+    for raw in competitors:
+        d = normalize_domain(raw)
+        if d:
+            provided_competitors.append(d)
+    provided_set = {c for c in provided_competitors if c and c != target_domain}
+
+    rows: List[Dict[str, object]] = []
+    keyword_hits_target = 0
+    keywords_with_serp_results = 0
+    discovered_counter: Dict[str, int] = {}
+
+    for item in keywords:
+        urls = fetch_bing_results(item.keyword, serp_depth, timeout, user_agent)
+        domains: List[str] = []
+        rank_by_domain: Dict[str, int] = {}
+        for idx, u in enumerate(urls, start=1):
+            d = normalize_domain(u)
+            if not d:
+                continue
+            domains.append(d)
+            if d not in rank_by_domain:
+                rank_by_domain[d] = idx
+                if d != target_domain:
+                    discovered_counter[d] = discovered_counter.get(d, 0) + 1
+
+        if domains:
+            keywords_with_serp_results += 1
+
+        target_rank = rank_by_domain.get(target_domain, 0)
+        if target_rank:
+            keyword_hits_target += 1
+        rows.append(
+            {
+                "keyword": item.keyword,
+                "group": item.group,
+                "value": item.value,
+                "is_brand": item.is_brand,
+                "target_rank": target_rank,
+                "domains": domains,
+                "rank_by_domain": rank_by_domain,
+            }
+        )
+
+    if auto_discover:
+        discovered_sorted = sorted(
+            [d for d in discovered_counter.items() if d[0] not in provided_set and d[0] != target_domain],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        for domain, _count in discovered_sorted[:max_discovered]:
+            provided_set.add(domain)
+
+    competitor_list = sorted(provided_set)
+    total_keywords = len(rows)
+    brand_keywords = sum(1 for r in rows if r["is_brand"])
+    non_brand_keywords = total_keywords - brand_keywords
+
+    competitor_profiles: List[Dict[str, object]] = []
+    for comp in competitor_list:
+        matched = 0
+        matched_brand = 0
+        matched_non_brand = 0
+        coappear = 0
+        weighted_presence = 0.0
+        rank_gaps: List[float] = []
+        avg_rank_sum = 0.0
+
+        for row in rows:
+            comp_rank = row["rank_by_domain"].get(comp, 0)
+            if not comp_rank:
+                continue
+            matched += 1
+            avg_rank_sum += comp_rank
+            weighted_presence += float(row["value"])
+            if row["is_brand"]:
+                matched_brand += 1
+            else:
+                matched_non_brand += 1
+
+            target_rank = row["target_rank"]
+            if target_rank:
+                coappear += 1
+                gap = target_rank - comp_rank
+                if gap > 0:
+                    rank_gaps.append(float(gap))
+
+        keyword_overlap = (matched / total_keywords * 100.0) if total_keywords else 0.0
+        serp_coappear = (coappear / keyword_hits_target * 100.0) if keyword_hits_target else 0.0
+        avg_rank_gap = (sum(rank_gaps) / len(rank_gaps)) if rank_gaps else 0.0
+        rank_pressure = min(100.0, (avg_rank_gap / max(1, serp_depth)) * 100.0)
+        non_brand_share = (matched_non_brand / max(1, non_brand_keywords) * 100.0) if non_brand_keywords else 0.0
+        brand_share = (matched_brand / max(1, brand_keywords) * 100.0) if brand_keywords else 0.0
+
+        score = (keyword_overlap * 0.45) + (serp_coappear * 0.35) + (rank_pressure * 0.20)
+        competitor_profiles.append(
+            {
+                "domain": comp,
+                "score": round(score, 2),
+                "keyword_overlap_pct": round(keyword_overlap, 2),
+                "serp_coappear_pct": round(serp_coappear, 2),
+                "rank_pressure_pct": round(rank_pressure, 2),
+                "brand_share_pct": round(brand_share, 2),
+                "non_brand_share_pct": round(non_brand_share, 2),
+                "matched_keywords": matched,
+                "average_rank": round(avg_rank_sum / matched, 2) if matched else 0.0,
+                "weighted_presence": round(weighted_presence, 2),
+            }
+        )
+
+    score_values = [float(p["score"]) for p in competitor_profiles]
+    p50 = percentile(score_values, 0.5)
+    p80 = percentile(score_values, 0.8)
+    for p in competitor_profiles:
+        p["tier"] = classify_competitor_tier(float(p["score"]), p50, p80)
+
+    priority_actions: List[ActionItem] = []
+    high_competitors = [p for p in competitor_profiles if p["tier"] in {"direct", "potential"}]
+    tracked_domains = [p["domain"] for p in high_competitors]
+
+    for row in rows:
+        if row["is_brand"]:
+            continue
+        target_rank = int(row["target_rank"])
+        best_comp_domain = ""
+        best_comp_rank = 0
+        hit_count = 0
+        for comp in tracked_domains:
+            comp_rank = int(row["rank_by_domain"].get(comp, 0))
+            if not comp_rank:
+                continue
+            hit_count += 1
+            if best_comp_rank == 0 or comp_rank < best_comp_rank:
+                best_comp_rank = comp_rank
+                best_comp_domain = comp
+        if best_comp_rank == 0:
+            continue
+
+        if target_rank == 0:
+            gap = serp_depth + 1 - best_comp_rank
+        else:
+            gap = target_rank - best_comp_rank
+        if gap < 3:
+            continue
+
+        impact_score = min(100.0, (gap * 8.0) + (hit_count * 6.0) + (float(row["value"]) * 5.0))
+        effort_score = 70.0 if target_rank == 0 else 45.0
+        priority, priority_score = calc_priority(impact_score, effort_score)
+        rec = (
+            "Create net-new high-value page and add to llms pin list."
+            if target_rank == 0
+            else "Refresh existing page title/meta/schema and re-submit in sitemap/llms."
+        )
+        priority_actions.append(
+            ActionItem(
+                keyword=str(row["keyword"]),
+                group=str(row["group"]),
+                priority=priority,
+                priority_score=priority_score,
+                impact_score=round(impact_score, 2),
+                effort_score=round(effort_score, 2),
+                target_rank=target_rank,
+                best_competitor=best_comp_domain,
+                best_competitor_rank=best_comp_rank,
+                recommendation=rec,
+            )
+        )
+
+    priority_actions.sort(key=lambda a: a.priority_score, reverse=True)
+
+    top_actions = [asdict(a) for a in priority_actions[:20]]
+    competitor_profiles.sort(key=lambda x: float(x["score"]), reverse=True)
+
+    return {
+        "meta": {
+            "target": base_url,
+            "target_domain": target_domain,
+            "generated_at_utc": now_utc(),
+            "tool": "geo-llms-toolkit standalone-cli",
+            "version": TOOL_VERSION,
+            "provider": "bing-serp",
+            "serp_depth": serp_depth,
+        },
+        "summary": {
+            "keywords_total": total_keywords,
+            "keywords_brand": brand_keywords,
+            "keywords_non_brand": non_brand_keywords,
+            "keywords_target_ranked": keyword_hits_target,
+            "keywords_with_serp_results": keywords_with_serp_results,
+            "competitors_tracked": len(competitor_profiles),
+            "actions_generated": len(top_actions),
+        },
+        "competitors": competitor_profiles,
+        "actions": top_actions,
+        "keywords": [
+            {
+                "keyword": r["keyword"],
+                "group": r["group"],
+                "value": r["value"],
+                "is_brand": r["is_brand"],
+                "target_rank": r["target_rank"],
+                "top_domains": r["domains"][:10],
+            }
+            for r in rows
+        ],
     }
 
 
@@ -790,6 +1197,91 @@ def to_csv_report(report: Dict[str, object]) -> str:
     return buf.getvalue()
 
 
+def to_monitor_markdown(report: Dict[str, object]) -> str:
+    meta = report["meta"]
+    summary = report["summary"]
+    competitors = report["competitors"]
+    actions = report["actions"]
+
+    lines = [
+        f"# GEO Competitor Monitor - {meta['target']}",
+        "",
+        f"- Generated (UTC): {meta['generated_at_utc']}",
+        f"- Provider: {meta['provider']}",
+        f"- Keywords: {summary['keywords_total']} (brand={summary['keywords_brand']}, non-brand={summary['keywords_non_brand']})",
+        f"- Keywords with SERP data: {summary['keywords_with_serp_results']}",
+        f"- Competitors tracked: {summary['competitors_tracked']}",
+        f"- Priority actions: {summary['actions_generated']}",
+        "",
+        "## Competitor Scores",
+        "",
+        "| Domain | Tier | Score | Keyword Overlap % | Co-appear % | Rank Pressure % | Non-Brand Share % | Avg Rank |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+
+    for c in competitors:
+        lines.append(
+            f"| {c['domain']} | {str(c['tier']).upper()} | {c['score']} | {c['keyword_overlap_pct']} | "
+            f"{c['serp_coappear_pct']} | {c['rank_pressure_pct']} | {c['non_brand_share_pct']} | {c['average_rank']} |"
+        )
+
+    if summary["keywords_with_serp_results"] == 0:
+        lines.extend(
+            [
+                "",
+                "> Warning: no SERP data was captured. Check network, provider accessibility, or try a different region/proxy.",
+            ]
+        )
+
+    lines.extend(["", "## Priority Actions", "", "| Priority | Keyword | Group | Target Rank | Best Competitor | Gap Action |",
+                  "| --- | --- | --- | ---: | --- | --- |"])
+
+    for action in actions:
+        target_rank = action["target_rank"] if action["target_rank"] else "-"
+        lines.append(
+            f"| {action['priority']} ({action['priority_score']}) | {action['keyword']} | {action['group']} | "
+            f"{target_rank} | {action['best_competitor']} #{action['best_competitor_rank']} | {action['recommendation']} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def to_monitor_csv(report: Dict[str, object]) -> str:
+    from io import StringIO
+
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "domain",
+            "tier",
+            "score",
+            "keyword_overlap_pct",
+            "serp_coappear_pct",
+            "rank_pressure_pct",
+            "brand_share_pct",
+            "non_brand_share_pct",
+            "matched_keywords",
+            "average_rank",
+        ]
+    )
+    for c in report["competitors"]:
+        writer.writerow(
+            [
+                c["domain"],
+                c["tier"],
+                c["score"],
+                c["keyword_overlap_pct"],
+                c["serp_coappear_pct"],
+                c["rank_pressure_pct"],
+                c["brand_share_pct"],
+                c["non_brand_share_pct"],
+                c["matched_keywords"],
+                c["average_rank"],
+            ]
+        )
+    return buf.getvalue()
+
+
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -801,6 +1293,14 @@ def render_scan_output(report: Dict[str, object], output_format: str) -> str:
     if output_format == "csv":
         return to_csv_report(report)
     return to_markdown_report(report)
+
+
+def render_monitor_output(report: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        return to_monitor_csv(report)
+    return to_monitor_markdown(report)
 
 
 def choose_title(url: str, page: PageSignals) -> str:
@@ -912,6 +1412,43 @@ def handle_scan(args: argparse.Namespace) -> int:
     return 0 if report["summary"]["fail"] == 0 else 2
 
 
+def handle_monitor(args: argparse.Namespace) -> int:
+    base_url = normalize_base_url(args.target)
+    target_domain = normalize_domain(base_url)
+    inferred_brand = [p for p in re.split(r"[-_.]", target_domain.split(".")[0]) if len(p) >= 2]
+    brand_tokens = sorted({t.lower() for t in (args.brand_token or []) + inferred_brand})
+
+    keywords_path = Path(args.keywords_file).expanduser().resolve()
+    keywords = read_keywords_file(keywords_path, brand_tokens=brand_tokens, max_keywords=args.max_keywords)
+    report = run_monitor(
+        base_url=base_url,
+        keywords=keywords,
+        competitors=args.competitor or [],
+        timeout=args.timeout,
+        user_agent=args.user_agent,
+        serp_depth=args.serp_depth,
+        auto_discover=args.discover_competitors,
+        max_discovered=args.max_discovered,
+    )
+    content = render_monitor_output(report, args.format)
+
+    if args.output:
+        out_path = Path(args.output).expanduser().resolve()
+        write_text(out_path, content)
+        print(f"Monitor report saved: {out_path}")
+    else:
+        sys.stdout.write(content)
+
+    if args.history_dir:
+        history_dir = Path(args.history_dir).expanduser().resolve()
+        history_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        snapshot_path = history_dir / f"monitor-{normalize_domain(base_url)}-{stamp}.json"
+        write_text(snapshot_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        print(f"Snapshot saved: {snapshot_path}")
+    return 0
+
+
 def handle_llms(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.target)
     output_dir = Path(args.output_dir).expanduser().resolve()
@@ -973,7 +1510,7 @@ def handle_all(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="geo",
-        description="GEO LLMs Toolkit standalone CLI (scan + llms generation).",
+        description="GEO LLMs Toolkit standalone CLI (scan + llms + competitor monitor).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1005,6 +1542,25 @@ def build_parser() -> argparse.ArgumentParser:
     all_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     all_p.add_argument("--user-agent", default=DEFAULT_UA)
     all_p.set_defaults(func=handle_all)
+
+    monitor_p = sub.add_parser(
+        "monitor",
+        help="Monitor competitors by keyword SERP overlap and generate prioritized actions.",
+    )
+    monitor_p.add_argument("target", help="Domain or URL, e.g. aronhouyu.com")
+    monitor_p.add_argument("--keywords-file", required=True, help="TXT/CSV/TSV file of keywords.")
+    monitor_p.add_argument("--competitor", action="append", help="Competitor domain. Can be repeated.")
+    monitor_p.add_argument("--discover-competitors", action="store_true", help="Auto-discover competitors from SERP.")
+    monitor_p.add_argument("--max-discovered", type=int, default=8, help="Max discovered competitors to include.")
+    monitor_p.add_argument("--brand-token", action="append", help="Extra brand token(s) for brand keyword isolation.")
+    monitor_p.add_argument("--serp-depth", type=int, default=10, help="SERP depth per keyword (max 50).")
+    monitor_p.add_argument("--max-keywords", type=int, default=100, help="Max keywords loaded from file.")
+    monitor_p.add_argument("--history-dir", default=".geo-history", help="Directory to store JSON snapshots.")
+    monitor_p.add_argument("--format", choices=["markdown", "json", "csv"], default="markdown")
+    monitor_p.add_argument("--output", help="Write report to a file path.")
+    monitor_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    monitor_p.add_argument("--user-agent", default=DEFAULT_UA)
+    monitor_p.set_defaults(func=handle_monitor)
 
     return parser
 
