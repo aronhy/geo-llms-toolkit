@@ -119,6 +119,8 @@ cd /path/to/geo-llms-toolkit
 
 - 宝塔 + Nginx + Cloudflare 详细指南：
 - `../../docs/wordpress-detailed-setup.md`
+- WordPress 全参数配置教程（含每个 key 的默认值/推荐值）：
+- `../../docs/wordpress-config-tutorial.md`
 
 ## 8. 注意事项
 

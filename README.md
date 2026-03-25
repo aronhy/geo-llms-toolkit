@@ -101,6 +101,7 @@ CLI 命令组：
 
 - CLI 文档：[standalone/README.md](./standalone/README.md)
 - WordPress 文档：[adapters/wordpress/README.md](./adapters/wordpress/README.md)
+- WordPress 全参数配置教程：[docs/wordpress-config-tutorial.md](./docs/wordpress-config-tutorial.md)
 - WordPress 详细环境配置（宝塔/Nginx/Cloudflare）：[docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
 - Outreach 适配说明：[docs/backlink-outreach-js-adapter.md](./docs/backlink-outreach-js-adapter.md)
 - 迁移计划：[docs/migration-plan.md](./docs/migration-plan.md)
