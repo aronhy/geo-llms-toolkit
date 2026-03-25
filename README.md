@@ -31,7 +31,15 @@ chmod +x geo
   --keywords-file ./examples/keywords.txt \
   --competitor example.com \
   --discover-competitors \
-  --output ./output/monitor.md
+  --format json \
+  --output ./output/monitor.json
+
+# Build outreach plan from monitor result
+./geo outreach \
+  --monitor-report ./output/monitor.json \
+  --pitch-url https://aronhouyu.com/your-best-page \
+  --site-name "Aron Houyu" \
+  --output-dir ./output/outreach
 ```
 
 Standalone guide: [standalone/README.md](./standalone/README.md)
@@ -46,11 +54,10 @@ WordPress adapter is still included in this repository:
 Install docs: [adapters/wordpress/readme.txt](./adapters/wordpress/readme.txt)
 Detailed setup (BT + Nginx + Cloudflare): [docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
 
-## 3) Latest updates (WordPress 1.6.0)
-
-## 3) Latest updates (Standalone 0.3.0 + WordPress 1.6.0)
+## 3) Latest updates (Standalone 0.4.0 + WordPress 1.6.0)
 
 - **New CLI competitor monitor** (`geo monitor`): keyword-based competitor scoring, brand/non-brand keyword split, prioritized action list (`P0/P1/P2`), and history snapshots for weekly trend tracking.
+- **New CLI outreach planner** (`geo outreach`): turns monitor JSON into outreach prospects CSV/JSON + ready-to-send email sequence templates.
 
 - **Issue-driven auto safe-fix**: regenerate missing `llms.txt` / `llms-full.txt`, enforce homepage `<link rel="llms" href="/llms.txt">`, enable low-value page `noindex`, and enable WP-layer endpoint fallback for `robots.txt` / `sitemap.xml` / `sitemap_index.xml` / `wp-sitemap.xml`.
 - **Safe-fix mode levels**: `Strict` (default, low-risk only, no H1/H2/CSS/UI structural edits) and `Balanced` (extends with fallback OG/Twitter + Schema output without changing template structure).

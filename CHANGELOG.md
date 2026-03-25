@@ -56,3 +56,19 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 - Standalone docs and root README now include competitor monitor usage.
 - Standalone CLI version and default user-agent bumped to `0.3.0`.
+
+## [0.4.0] - 2026-03-25
+
+### Added
+
+- New standalone CLI command `outreach`:
+- build outreach plans from `geo monitor --format json` results
+- generate `outreach-prospects.csv` for automation pipelines
+- generate `outreach-plan.json` for programmatic integration
+- generate `outreach-sequences.md` with template emails
+- include domain-level filtering for non-outreach domains and custom exclusions
+
+### Changed
+
+- Root and standalone README updated with monitor -> outreach workflow examples.
+- Standalone CLI description updated to include outreach planning.

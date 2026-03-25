@@ -8,7 +8,8 @@ This folder stores usage examples for standalone and adapter modes.
 ./geo scan example.com --format markdown --output ./output/scan.md
 ./geo llms example.com --output-dir ./output
 ./geo all example.com --output-dir ./output --report-format json
-./geo monitor example.com --keywords-file ./examples/keywords.txt --discover-competitors --output ./output/monitor.md
+./geo monitor example.com --keywords-file ./examples/keywords.txt --discover-competitors --format json --output ./output/monitor.json
+./geo outreach --monitor-report ./output/monitor.json --pitch-url https://example.com/guide --output-dir ./output/outreach
 ```
 
 ## Adapter examples (planned)

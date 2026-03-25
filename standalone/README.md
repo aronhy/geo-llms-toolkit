@@ -36,8 +36,15 @@ chmod +x geo
   --competitor example.com \
   --competitor another.com \
   --discover-competitors \
-  --format markdown \
-  --output ./output/monitor.md
+  --format json \
+  --output ./output/monitor.json
+
+# 6) Build outreach plan from monitor result
+./geo outreach \
+  --monitor-report ./output/monitor.json \
+  --pitch-url https://aronhouyu.com/your-best-page \
+  --site-name "Aron Houyu" \
+  --output-dir ./output/outreach
 ```
 
 ## Output files
@@ -47,6 +54,7 @@ chmod +x geo
 - `geo-scan-report.(md|json|csv)` when using `all` or `scan --output`
 - `monitor.(md|json|csv)` when using `monitor --output`
 - `.geo-history/monitor-<domain>-<timestamp>.json` snapshot (default)
+- `outreach-plan.json`, `outreach-prospects.csv`, `outreach-report.md`, `outreach-sequences.md` when using `outreach`
 
 ## Monitor keywords file format
 
@@ -76,3 +84,4 @@ ai seo tools,expansion,1.0
 - Sitemap discovery checks `/sitemap.xml`, `/sitemap_index.xml`, `/wp-sitemap.xml`.
 - If sitemap discovery fails, llms generation falls back to homepage-only output.
 - `monitor` currently uses Bing SERP HTML as default provider.
+- `outreach` currently generates domain-level prospect lists and template email sequences; contact discovery/sending should be connected via your own outreach stack (n8n/CRM/backlink-outreach-js).

@@ -26,9 +26,9 @@ from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.3.0"
+TOOL_VERSION = "0.4.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.3 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.4 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -49,6 +49,21 @@ LOW_VALUE_PATTERNS = [
     r"/preview",
     r"/feed/?",
 ]
+
+NON_OUTREACH_DOMAINS = {
+    "google.com",
+    "bing.com",
+    "youtube.com",
+    "facebook.com",
+    "instagram.com",
+    "x.com",
+    "twitter.com",
+    "linkedin.com",
+    "wikipedia.org",
+    "reddit.com",
+    "pinterest.com",
+    "tiktok.com",
+}
 
 
 @dataclass
@@ -90,6 +105,22 @@ class ActionItem:
     best_competitor: str
     best_competitor_rank: int
     recommendation: str
+
+
+@dataclass
+class OutreachProspect:
+    domain: str
+    prospect_score: float
+    opportunities: int
+    average_serp_rank: float
+    top_gap_keyword: str
+    top_gap_group: str
+    best_competitor: str
+    best_competitor_rank: int
+    keywords: List[str]
+    outreach_angle: str
+    email_subject: str
+    email_body: str
 
 
 class PageSignals(HTMLParser):
@@ -444,6 +475,192 @@ def calc_priority(impact_score: float, effort_score: float) -> Tuple[str, float]
     else:
         label = "P2"
     return label, round(priority_score, 2)
+
+
+def domain_matches_any(domain: str, patterns: Sequence[str]) -> bool:
+    for p in patterns:
+        normalized = normalize_domain(p)
+        if not normalized:
+            continue
+        if domain == normalized or domain.endswith(f".{normalized}"):
+            return True
+    return False
+
+
+def load_monitor_report(path: Path) -> Dict[str, object]:
+    if not path.exists():
+        raise ValueError(f"monitor report file not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("invalid monitor report: expected JSON object")
+    required = ["meta", "summary", "competitors", "actions", "keywords"]
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ValueError(f"invalid monitor report: missing keys {', '.join(missing)}")
+    return data
+
+
+def build_outreach_plan(
+    monitor_report: Dict[str, object],
+    pitch_url: str,
+    site_name: str,
+    offer: str,
+    max_prospects: int,
+    min_prospect_score: float,
+    min_opportunities: int,
+    exclude_domains: Sequence[str],
+) -> Dict[str, object]:
+    meta = monitor_report.get("meta", {})
+    target_domain = normalize_domain(str(meta.get("target_domain") or meta.get("target") or ""))
+    if not target_domain:
+        raise ValueError("monitor report does not contain target domain")
+
+    competitors = monitor_report.get("competitors", [])
+    actions = monitor_report.get("actions", [])
+    keywords = monitor_report.get("keywords", [])
+    if not isinstance(competitors, list) or not isinstance(actions, list) or not isinstance(keywords, list):
+        raise ValueError("monitor report fields have unexpected format")
+
+    competitor_set = {normalize_domain(str(c.get("domain", ""))) for c in competitors if isinstance(c, dict)}
+    competitor_set = {d for d in competitor_set if d}
+    blocked_patterns = list(NON_OUTREACH_DOMAINS) + list(exclude_domains)
+
+    action_map: Dict[str, Dict[str, object]] = {}
+    for action in actions:
+        if isinstance(action, dict) and action.get("keyword"):
+            action_map[str(action["keyword"])] = action
+
+    domain_stats: Dict[str, Dict[str, object]] = {}
+    for kw in keywords:
+        if not isinstance(kw, dict):
+            continue
+        if bool(kw.get("is_brand")):
+            continue
+
+        target_rank = int(kw.get("target_rank") or 0)
+        if target_rank and target_rank <= 3:
+            continue
+
+        top_domains = kw.get("top_domains", [])
+        if not isinstance(top_domains, list):
+            continue
+        keyword = str(kw.get("keyword") or "")
+        group = str(kw.get("group") or "default")
+        value = float(kw.get("value") or 1.0)
+        action = action_map.get(keyword, {})
+        best_comp = str(action.get("best_competitor") or "")
+        best_comp_rank = int(action.get("best_competitor_rank") or 0)
+
+        for rank, raw_domain in enumerate(top_domains, start=1):
+            domain = normalize_domain(str(raw_domain))
+            if not domain:
+                continue
+            if domain == target_domain:
+                continue
+            if domain in competitor_set:
+                continue
+            if domain_matches_any(domain, blocked_patterns):
+                continue
+
+            gap_bonus = 6.0 if target_rank == 0 else min(6.0, max(0.0, (target_rank - 3) * 0.8))
+            rank_score = max(0.5, (11.0 - min(rank, 10)))
+            score = (rank_score + gap_bonus) * value
+
+            info = domain_stats.get(domain)
+            if not info:
+                info = {
+                    "score": 0.0,
+                    "hits": 0,
+                    "rank_sum": 0.0,
+                    "keywords": [],
+                    "top_gap_keyword": keyword,
+                    "top_gap_group": group,
+                    "top_gap_weight": score,
+                    "best_competitor": best_comp,
+                    "best_competitor_rank": best_comp_rank,
+                }
+                domain_stats[domain] = info
+
+            info["score"] = float(info["score"]) + score
+            info["hits"] = int(info["hits"]) + 1
+            info["rank_sum"] = float(info["rank_sum"]) + rank
+            info["keywords"].append(keyword)
+
+            if score > float(info["top_gap_weight"]):
+                info["top_gap_weight"] = score
+                info["top_gap_keyword"] = keyword
+                info["top_gap_group"] = group
+                info["best_competitor"] = best_comp
+                info["best_competitor_rank"] = best_comp_rank
+
+    prospects: List[OutreachProspect] = []
+    for domain, info in domain_stats.items():
+        hits = int(info["hits"])
+        score = round(float(info["score"]), 2)
+        if hits < min_opportunities or score < min_prospect_score:
+            continue
+
+        unique_keywords = sorted(set([str(k) for k in info["keywords"]]))[:12]
+        gap_keyword = str(info["top_gap_keyword"])
+        gap_group = str(info["top_gap_group"])
+        best_comp = str(info["best_competitor"])
+        best_comp_rank = int(info["best_competitor_rank"])
+
+        angle = f"Gap keyword '{gap_keyword}' where your site underperforms."
+        subject = f"Resource suggestion for {gap_keyword}"
+        body = textwrap.dedent(
+            f"""\
+            Hi [First Name],
+
+            I was reading your content on {gap_keyword} and found it very useful.
+            We recently published a practical resource that may complement your page:
+            {pitch_url}
+
+            Offer: {offer}
+            If useful for your readers, feel free to include it as a reference.
+
+            Best,
+            {site_name}
+            """
+        ).strip()
+
+        prospects.append(
+            OutreachProspect(
+                domain=domain,
+                prospect_score=score,
+                opportunities=hits,
+                average_serp_rank=round(float(info["rank_sum"]) / max(1, hits), 2),
+                top_gap_keyword=gap_keyword,
+                top_gap_group=gap_group,
+                best_competitor=best_comp,
+                best_competitor_rank=best_comp_rank,
+                keywords=unique_keywords,
+                outreach_angle=angle,
+                email_subject=subject,
+                email_body=body,
+            )
+        )
+
+    prospects.sort(key=lambda p: p.prospect_score, reverse=True)
+    prospects = prospects[:max_prospects]
+
+    return {
+        "meta": {
+            "generated_at_utc": now_utc(),
+            "target_domain": target_domain,
+            "pitch_url": pitch_url,
+            "site_name": site_name,
+            "offer": offer,
+            "source_provider": meta.get("provider"),
+            "source_report_generated_at_utc": meta.get("generated_at_utc"),
+        },
+        "summary": {
+            "prospects_total": len(prospects),
+            "min_prospect_score": min_prospect_score,
+            "min_opportunities": min_opportunities,
+        },
+        "prospects": [asdict(p) for p in prospects],
+    }
 
 
 def parse_jsonld_blocks(blocks: Iterable[str]) -> List[Dict[str, object]]:
@@ -1282,6 +1499,90 @@ def to_monitor_csv(report: Dict[str, object]) -> str:
     return buf.getvalue()
 
 
+def to_outreach_markdown(plan: Dict[str, object]) -> str:
+    meta = plan["meta"]
+    summary = plan["summary"]
+    prospects = plan["prospects"]
+
+    lines = [
+        f"# GEO Outreach Plan - {meta['target_domain']}",
+        "",
+        f"- Generated (UTC): {meta['generated_at_utc']}",
+        f"- Pitch URL: {meta['pitch_url']}",
+        f"- Offer: {meta['offer']}",
+        f"- Prospects: {summary['prospects_total']}",
+        "",
+        "## Prospect List",
+        "",
+        "| Domain | Score | Opportunities | Avg SERP Rank | Top Gap Keyword | Best Competitor |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+
+    for p in prospects:
+        best_comp = f"{p['best_competitor']} #{p['best_competitor_rank']}" if p["best_competitor"] else "-"
+        lines.append(
+            f"| {p['domain']} | {p['prospect_score']} | {p['opportunities']} | {p['average_serp_rank']} | "
+            f"{p['top_gap_keyword']} | {best_comp} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def to_outreach_csv(plan: Dict[str, object]) -> str:
+    from io import StringIO
+
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "domain",
+            "prospect_score",
+            "opportunities",
+            "average_serp_rank",
+            "top_gap_keyword",
+            "top_gap_group",
+            "best_competitor",
+            "best_competitor_rank",
+            "keywords",
+            "outreach_angle",
+            "email_subject",
+            "email_body",
+        ]
+    )
+    for p in plan["prospects"]:
+        writer.writerow(
+            [
+                p["domain"],
+                p["prospect_score"],
+                p["opportunities"],
+                p["average_serp_rank"],
+                p["top_gap_keyword"],
+                p["top_gap_group"],
+                p["best_competitor"],
+                p["best_competitor_rank"],
+                "; ".join(p["keywords"]),
+                p["outreach_angle"],
+                p["email_subject"],
+                p["email_body"],
+            ]
+        )
+    return buf.getvalue()
+
+
+def to_outreach_sequences_markdown(plan: Dict[str, object]) -> str:
+    lines = ["# GEO Outreach Email Sequences", ""]
+    for idx, p in enumerate(plan["prospects"], start=1):
+        lines.append(f"## {idx}. {p['domain']}")
+        lines.append(f"- Score: {p['prospect_score']}")
+        lines.append(f"- Top keyword gap: {p['top_gap_keyword']}")
+        lines.append(f"- Subject: {p['email_subject']}")
+        lines.append("")
+        lines.append("```text")
+        lines.append(p["email_body"])
+        lines.append("```")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -1301,6 +1602,14 @@ def render_monitor_output(report: Dict[str, object], output_format: str) -> str:
     if output_format == "csv":
         return to_monitor_csv(report)
     return to_monitor_markdown(report)
+
+
+def render_outreach_output(plan: Dict[str, object], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(plan, ensure_ascii=False, indent=2) + "\n"
+    if output_format == "csv":
+        return to_outreach_csv(plan)
+    return to_outreach_markdown(plan)
 
 
 def choose_title(url: str, page: PageSignals) -> str:
@@ -1449,6 +1758,55 @@ def handle_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_outreach(args: argparse.Namespace) -> int:
+    monitor_path = Path(args.monitor_report).expanduser().resolve()
+    monitor_report = load_monitor_report(monitor_path)
+    target_domain = normalize_domain(str(monitor_report.get("meta", {}).get("target_domain") or ""))
+    site_name = args.site_name or target_domain
+
+    pitch_url = args.pitch_url.strip()
+    if not re.match(r"^https?://", pitch_url, flags=re.I):
+        raise ValueError("pitch-url must be a full URL (http/https)")
+
+    plan = build_outreach_plan(
+        monitor_report=monitor_report,
+        pitch_url=pitch_url,
+        site_name=site_name,
+        offer=args.offer,
+        max_prospects=args.max_prospects,
+        min_prospect_score=args.min_prospect_score,
+        min_opportunities=args.min_opportunities,
+        exclude_domains=args.exclude_domain or [],
+    )
+
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    plan_json_path = output_dir / "outreach-plan.json"
+    prospects_csv_path = output_dir / "outreach-prospects.csv"
+    report_md_path = output_dir / "outreach-report.md"
+    sequences_md_path = output_dir / "outreach-sequences.md"
+
+    write_text(plan_json_path, render_outreach_output(plan, "json"))
+    write_text(prospects_csv_path, render_outreach_output(plan, "csv"))
+    write_text(report_md_path, render_outreach_output(plan, "markdown"))
+    write_text(sequences_md_path, to_outreach_sequences_markdown(plan))
+
+    print(
+        textwrap.dedent(
+            f"""\
+            Outreach plan generated.
+            - Prospects: {plan['summary']['prospects_total']}
+            - JSON: {plan_json_path}
+            - CSV: {prospects_csv_path}
+            - Report: {report_md_path}
+            - Sequences: {sequences_md_path}
+            """
+        ).rstrip()
+    )
+    return 0
+
+
 def handle_llms(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.target)
     output_dir = Path(args.output_dir).expanduser().resolve()
@@ -1510,7 +1868,7 @@ def handle_all(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="geo",
-        description="GEO LLMs Toolkit standalone CLI (scan + llms + competitor monitor).",
+        description="GEO LLMs Toolkit standalone CLI (scan + llms + monitor + outreach).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1561,6 +1919,21 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     monitor_p.add_argument("--user-agent", default=DEFAULT_UA)
     monitor_p.set_defaults(func=handle_monitor)
+
+    outreach_p = sub.add_parser(
+        "outreach",
+        help="Generate outreach prospects and email sequences from monitor JSON report.",
+    )
+    outreach_p.add_argument("--monitor-report", required=True, help="Path to `geo monitor --format json` output.")
+    outreach_p.add_argument("--pitch-url", required=True, help="Your page URL to promote in outreach.")
+    outreach_p.add_argument("--site-name", help="Sender/site name used in email templates.")
+    outreach_p.add_argument("--offer", default="Resource inclusion request", help="Offer text in email template.")
+    outreach_p.add_argument("--max-prospects", type=int, default=30, help="Max prospects to keep.")
+    outreach_p.add_argument("--min-prospect-score", type=float, default=8.0, help="Min prospect score threshold.")
+    outreach_p.add_argument("--min-opportunities", type=int, default=1, help="Min keyword opportunities per domain.")
+    outreach_p.add_argument("--exclude-domain", action="append", help="Domain pattern to exclude (repeatable).")
+    outreach_p.add_argument("--output-dir", default="./outreach-output", help="Output directory for generated files.")
+    outreach_p.set_defaults(func=handle_outreach)
 
     return parser
 
