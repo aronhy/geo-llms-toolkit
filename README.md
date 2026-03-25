@@ -37,6 +37,7 @@ WordPress adapter is still included in this repository:
 - Includes llms auto-regeneration, GEO scan, safe-fix flow, report export, optional cache purge.
 
 Install docs: [adapters/wordpress/readme.txt](./adapters/wordpress/readme.txt)
+Detailed setup (BT + Nginx + Cloudflare): [docs/wordpress-detailed-setup.md](./docs/wordpress-detailed-setup.md)
 
 ## 3) Latest updates (WordPress 1.6.0)
 

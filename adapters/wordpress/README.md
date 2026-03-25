@@ -35,6 +35,9 @@
 4. 后台可手动触发：
    - `设置 -> GEO LLMS Auto -> 立即重建 llms 文件`
 
+详细环境配置（宝塔 + Nginx + Cloudflare）：
+- `../../docs/wordpress-detailed-setup.md`
+
 ## 触发条件
 
 - 新发布文章/页面
