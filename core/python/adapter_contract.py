@@ -46,12 +46,23 @@ class AdapterActionResult:
     meta: Dict[str, object] = field(default_factory=dict)
 
 
+@dataclass
+class AdapterCapabilities:
+    can_write_index_files: bool = False
+    can_auto_fix: bool = False
+    can_purge_cache: bool = False
+
+
 class GeoAdapterContract(ABC):
     """Minimal adapter contract for multi-platform migration (Phase 3)."""
 
     @abstractmethod
     def get_site_identity(self) -> AdapterSiteIdentity:
         """Return basic site identity (name/url/locale)."""
+
+    @abstractmethod
+    def get_capabilities(self) -> AdapterCapabilities:
+        """Return adapter runtime capabilities."""
 
     @abstractmethod
     def fetch(self, url: str, options: Optional[AdapterFetchOptions] = None) -> AdapterHttpResponse:
@@ -76,4 +87,3 @@ class GeoAdapterContract(ABC):
     @abstractmethod
     def purge_cache(self, context: Dict[str, object]) -> AdapterActionResult:
         """Purge adapter-side cache/CDN based on provided context."""
-

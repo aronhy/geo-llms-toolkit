@@ -8,6 +8,7 @@ Current contract methods:
 
 ```text
 get_site_identity() -> AdapterSiteIdentity
+get_capabilities() -> AdapterCapabilities
 fetch(url, options) -> AdapterHttpResponse
 list_high_value_pages(limit) -> AdapterPage[]
 list_low_value_pages(limit) -> AdapterPage[]
@@ -23,6 +24,7 @@ Type models included:
 - `AdapterFetchOptions`
 - `AdapterHttpResponse`
 - `AdapterActionResult`
+- `AdapterCapabilities` (`can_write_index_files`, `can_auto_fix`, `can_purge_cache`)
 
 Why this exists:
 
@@ -33,4 +35,5 @@ Why this exists:
 Current implementation status:
 
 - Standalone CLI ships `StandaloneWebAdapter` implementing this contract.
+- Standalone CLI also provides `ShopifyReadOnlyAdapter` and `GenericHttpReadOnlyAdapter` for read-only scans/diagnostics.
 - WordPress adapter remains integrated in plugin runtime and will be incrementally wired to this contract in next phases.

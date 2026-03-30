@@ -7,7 +7,7 @@
 
 ## 当前版本
 
-- Standalone CLI: `0.15.0`
+- Standalone CLI: `0.16.0`
 - WordPress Plugin (`GEO LLMS Auto Regenerator`): `1.9.0`
 
 `1.9.0` 已补齐 WordPress 对 CLI 关键参数的对齐项（brand-token / exclude-domain / enrich-contacts / apify-allow-fallback-first）。
@@ -40,7 +40,7 @@ chmod +x geo
 最短实战链路：
 
 ```bash
-./geo scan aronhouyu.com
+./geo scan aronhouyu.com --platform-profile auto --rules-file ./.geo-rules.json
 ./geo llms aronhouyu.com --output-dir ./output
 ./geo adapter-check aronhouyu.com --format markdown
 ./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --discover-competitors --output ./output/monitor.json --format json
@@ -73,6 +73,12 @@ CLI 命令组：
 
 - `keyword_load_stats`（raw/kept/duplicate_skipped/low_specificity 等）
 - `keyword_low_specificity_samples`（示例关键词 + 原因）
+
+`scan` 关键参数补充：
+
+- `--rules-file`（默认会自动读取根目录 `.geo-rules.json`）
+- `--platform-profile auto|wordpress|shopify|webflow|ghost|custom`
+- `scan` 输出新增：`meta.platform`、`meta.platform_confidence`、`meta.discovery`、`checks[*].applicability`
 
 ## WordPress 插件快速开始
 
@@ -122,12 +128,13 @@ CLI 命令组：
 - Outreach 适配说明：[docs/backlink-outreach-js-adapter.md](./docs/backlink-outreach-js-adapter.md)
 - 迁移计划：[docs/migration-plan.md](./docs/migration-plan.md)
 - 适配器合同：[core/docs/adapter-contract.md](./core/docs/adapter-contract.md)
+- 本期 PRD：[PRD-universal-site-adaptation.md](./PRD-universal-site-adaptation.md)
 
 ## Known Limitations
 
-- 当前扫描默认检查固定 sitemap 端点（`/sitemap.xml`、`/sitemap_index.xml`、`/wp-sitemap.xml`）。对使用自定义 sitemap 路径的网站（如 `robots.txt` 声明 `/shared/sitemap.xml.gz`）可能出现误报。
+- 平台识别是启发式规则，极少数站点可能低置信度回退到 `custom`；可用 `--platform-profile` 强制指定。
 - `llms.txt` / `llms-full.txt` 采用强校验（非 `200` 视为失败）。对未部署 LLMS 文件的网站会产生 `FAIL`。
-- 非 WordPress 站点在 `wp-sitemap.xml` 上通常天然不存在，当前会按失败记录。
+- Shopify / Webflow / Ghost 目前在 CLI 仅提供只读适配（扫描/诊断/报告），不做自动写入修复。
 
 ## 开发命令
 

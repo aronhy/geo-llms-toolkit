@@ -2,10 +2,10 @@
 
 from .adapter_contract import (  # noqa: F401
     AdapterActionResult,
+    AdapterCapabilities,
     AdapterFetchOptions,
     AdapterHttpResponse,
     AdapterPage,
     AdapterSiteIdentity,
     GeoAdapterContract,
 )
-

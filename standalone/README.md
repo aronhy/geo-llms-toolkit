@@ -20,7 +20,9 @@ chmod +x geo
 
 ```bash
 # A) 站点诊断
-./geo scan aronhouyu.com
+./geo scan aronhouyu.com \
+  --platform-profile auto \
+  --rules-file ./.geo-rules.json
 
 # B) 生成 llms 文件
 ./geo llms aronhouyu.com --output-dir ./output
@@ -60,6 +62,10 @@ chmod +x geo
 ## 4. 命令模块说明
 
 - `geo scan`: 基础 GEO/SEO 信号与端点检查
+  - 支持 sitemap 自动发现：`robots.txt -> 默认路径 -> 首页线索`
+  - 支持平台识别：`wordpress/shopify/webflow/ghost/custom`
+  - 支持 `--platform-profile` 强制指定与 `--rules-file` 规则配置
+  - 报告新增：`meta.discovery`、`meta.platform*`、`checks[*].applicability`
 - `geo llms`: 生成 `llms.txt` / `llms-full.txt`
 - `geo adapter-check`: 验证内置适配器是否满足 Phase3 adapter contract
 - `geo monitor`: 关键词维度竞品监控 + 优先级动作建议
@@ -90,3 +96,4 @@ chmod +x geo
 - 先用 `dry-run` 验证流程
 - `index submit` 先做小批量
 - 保留 `.geo-history`，用于趋势分析与回归排查
+- 根目录维护 `.geo-rules.json`，把低价值页/noindex/schema检查改成配置驱动

@@ -19,6 +19,7 @@ import sys
 import textwrap
 import time
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html import unescape
@@ -35,6 +36,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from core.python.adapter_contract import (  # noqa: E402
     AdapterActionResult,
+    AdapterCapabilities,
     AdapterFetchOptions,
     AdapterHttpResponse,
     AdapterPage,
@@ -43,9 +45,9 @@ from core.python.adapter_contract import (  # noqa: E402
 )
 
 DEFAULT_TIMEOUT = 12
-TOOL_VERSION = "0.15.0"
+TOOL_VERSION = "0.16.0"
 DEFAULT_UA = (
-    "geo-llms-toolkit/0.15 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
+    "geo-llms-toolkit/0.16 standalone-cli (+https://github.com/aronhy/geo-llms-toolkit)"
 )
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -103,6 +105,37 @@ GENERIC_KEYWORD_TOKENS = {
     "marketing",
     "traffic",
     "content",
+}
+
+SUPPORTED_PLATFORM_PROFILES = {"auto", "wordpress", "shopify", "webflow", "ghost", "custom"}
+PLATFORM_DETECTABLE = {"wordpress", "shopify", "webflow", "ghost", "custom"}
+PLATFORM_CONFIDENCE_STRICT = 0.7
+
+DEFAULT_RULES_CONFIG: Dict[str, object] = {
+    "low_value_patterns": [],
+    "keyword_quality": {
+        "drop_low_specificity": False,
+    },
+    "noindex_policy": {
+        "low_value_probe_paths": [
+            "/wp-login.php",
+            "/login",
+            "/register",
+            "/lost-password",
+            "/sample-page",
+        ]
+    },
+    "schema_requirements": {
+        "article_required_fields": ["author", "datePublished", "dateModified", "publisher"],
+    },
+    "platform_overrides": {
+        "wordpress": {
+            "required_sitemap_paths": ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"],
+        },
+        "default": {
+            "required_sitemap_paths": ["/sitemap.xml", "/sitemap_index.xml"],
+        },
+    },
 }
 
 OUTREACH_STATUSES = {
@@ -180,6 +213,7 @@ class CheckResult:
     status: str
     message: str
     details: Dict[str, object]
+    applicability: str = "global"
 
 
 @dataclass
@@ -379,6 +413,46 @@ def parse_content_type(headers: Dict[str, str]) -> str:
     return headers.get("content-type", "").lower()
 
 
+def deep_merge_dict(base: Dict[str, object], patch: Dict[str, object]) -> Dict[str, object]:
+    out = deepcopy(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge_dict(out.get(key, {}), value)
+        else:
+            out[key] = value
+    return out
+
+
+def resolve_rules_file_path(raw_path: str) -> Optional[Path]:
+    if raw_path:
+        candidate = Path(raw_path).expanduser().resolve()
+        return candidate
+    default_path = (Path.cwd() / ".geo-rules.json").resolve()
+    if default_path.exists():
+        return default_path
+    return None
+
+
+def load_rules_config(raw_path: str = "") -> Tuple[Dict[str, object], Optional[str], List[str]]:
+    warnings: List[str] = []
+    path = resolve_rules_file_path(raw_path)
+    if path is None:
+        return deepcopy(DEFAULT_RULES_CONFIG), None, warnings
+    if not path.exists():
+        warnings.append(f"rules_file_not_found:{path}")
+        return deepcopy(DEFAULT_RULES_CONFIG), str(path), warnings
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - safe fallback
+        warnings.append(f"rules_file_parse_error:{exc}")
+        return deepcopy(DEFAULT_RULES_CONFIG), str(path), warnings
+    if not isinstance(payload, dict):
+        warnings.append("rules_file_invalid_root:expected_object")
+        return deepcopy(DEFAULT_RULES_CONFIG), str(path), warnings
+    merged = deep_merge_dict(DEFAULT_RULES_CONFIG, payload)
+    return merged, str(path), warnings
+
+
 def fetch_url(
     url: str,
     timeout: int = DEFAULT_TIMEOUT,
@@ -468,6 +542,13 @@ class StandaloneWebAdapter(GeoAdapterContract):
             name=normalize_domain(self.base_url),
             url=self.base_url,
             locale="",
+        )
+
+    def get_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            can_write_index_files=bool(self.output_dir),
+            can_auto_fix=False,
+            can_purge_cache=False,
         )
 
     def fetch(self, url: str, options: Optional[AdapterFetchOptions] = None) -> AdapterHttpResponse:
@@ -573,6 +654,81 @@ class StandaloneWebAdapter(GeoAdapterContract):
     def purge_cache(self, context: Dict[str, object]) -> AdapterActionResult:
         _ = context
         return AdapterActionResult(ok=False, detail="not_supported_in_standalone")
+
+
+class GenericHttpReadOnlyAdapter(StandaloneWebAdapter):
+    """Read-only adapter for generic websites."""
+
+    def get_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            can_write_index_files=False,
+            can_auto_fix=False,
+            can_purge_cache=False,
+        )
+
+    def write_index_files(self, llms_text: str, llms_full_text: str) -> AdapterActionResult:
+        _ = llms_text
+        _ = llms_full_text
+        return AdapterActionResult(ok=False, detail="read_only_adapter")
+
+    def send_notification(self, payload: Dict[str, object]) -> AdapterActionResult:
+        _ = payload
+        return AdapterActionResult(ok=False, detail="read_only_adapter")
+
+    def purge_cache(self, context: Dict[str, object]) -> AdapterActionResult:
+        _ = context
+        return AdapterActionResult(ok=False, detail="read_only_adapter")
+
+
+class ShopifyReadOnlyAdapter(GenericHttpReadOnlyAdapter):
+    """Read-only adapter tuned for Shopify URL shapes."""
+
+    def list_high_value_pages(self, limit: int) -> List[AdapterPage]:
+        max_items = max(1, int(limit))
+        urls = collect_urls_from_sitemaps(
+            self.base_url,
+            timeout=self.timeout,
+            user_agent=self.user_agent,
+            max_urls=max(max_items * 6, 180),
+        )
+        prioritized: List[AdapterPage] = []
+        seen = set()
+        preferred_fragments = ["/products/", "/blogs/", "/pages/"]
+        for fragment in preferred_fragments:
+            for url in urls:
+                norm = normalize_url_for_compare(url)
+                if not norm or norm in seen:
+                    continue
+                if fragment not in safe_path(url).lower():
+                    continue
+                seen.add(norm)
+                prioritized.append(
+                    AdapterPage(
+                        url=url,
+                        group=classify_index_group(url, self.base_url, extra_low_patterns=self.extra_low_patterns),
+                    )
+                )
+                if len(prioritized) >= max_items:
+                    return prioritized
+
+        for url in urls:
+            norm = normalize_url_for_compare(url)
+            if not norm or norm in seen:
+                continue
+            if is_low_value_url(url, extra_patterns=self.extra_low_patterns):
+                continue
+            seen.add(norm)
+            prioritized.append(
+                AdapterPage(
+                    url=url,
+                    group=classify_index_group(url, self.base_url, extra_low_patterns=self.extra_low_patterns),
+                )
+            )
+            if len(prioritized) >= max_items:
+                break
+        if not prioritized:
+            prioritized.append(AdapterPage(url=f"{self.base_url}/", group="core"))
+        return prioritized
 
 
 def parse_html_signals(html: str) -> PageSignals:
@@ -2076,19 +2232,124 @@ def parse_sitemap_xml(xml_text: str) -> Tuple[str, List[str]]:
     raise ValueError("unsupported sitemap format")
 
 
-def discover_sitemaps(base_url: str, timeout: int, user_agent: str) -> Tuple[List[str], List[str]]:
-    candidates = [
+def extract_sitemap_urls_from_robots(robots_body: str, base_url: str) -> List[str]:
+    urls: List[str] = []
+    if not robots_body:
+        return urls
+    for raw_line in robots_body.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        head, tail = line.split(":", 1)
+        if head.strip().lower() != "sitemap":
+            continue
+        candidate = tail.strip()
+        if not candidate:
+            continue
+        if not re.match(r"^https?://", candidate, flags=re.I):
+            candidate = urljoin(base_url + "/", candidate.lstrip("/"))
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+
+def extract_sitemap_hints_from_homepage(home_html: str, base_url: str, limit: int = 10) -> List[str]:
+    if not home_html:
+        return []
+    hints: List[str] = []
+    patterns = [
+        r"""<link[^>]+rel=["'](?:sitemap|alternate)["'][^>]+href=["']([^"']+)["']""",
+        r"""<a[^>]+href=["']([^"']*(?:sitemap|feed)[^"']*)["']""",
+    ]
+    for pattern in patterns:
+        for raw in re.findall(pattern, home_html, flags=re.I):
+            url = urljoin(base_url + "/", raw.strip())
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            if url not in hints:
+                hints.append(url)
+            if len(hints) >= limit:
+                return hints
+    return hints
+
+
+def discover_sitemaps_with_diagnostics(
+    base_url: str,
+    timeout: int,
+    user_agent: str,
+    robots_response: Optional[FetchResult] = None,
+    homepage_response: Optional[FetchResult] = None,
+) -> Dict[str, object]:
+    default_candidates = [
         f"{base_url}/sitemap.xml",
         f"{base_url}/sitemap_index.xml",
         f"{base_url}/wp-sitemap.xml",
     ]
-    alive: List[str] = []
-    inspected: List[str] = []
-    for url in candidates:
+
+    robots_res = robots_response or fetch_url(f"{base_url}/robots.txt", timeout=timeout, user_agent=user_agent, max_bytes=300_000)
+    home_res = homepage_response or fetch_url(base_url + "/", timeout=timeout, user_agent=user_agent, max_bytes=1_200_000)
+
+    robots_candidates = extract_sitemap_urls_from_robots(robots_res.body, base_url) if robots_res.status == 200 else []
+    homepage_candidates = []
+    if home_res.status == 200 and "html" in parse_content_type(home_res.headers):
+        homepage_candidates = extract_sitemap_hints_from_homepage(home_res.body, base_url)
+
+    candidate_items: List[Tuple[str, str]] = []
+    for source, urls in [
+        ("robots", robots_candidates),
+        ("default", default_candidates),
+        ("homepage_hint", homepage_candidates),
+    ]:
+        for url in urls:
+            candidate_items.append((source, url))
+
+    seen = set()
+    unique_candidates: List[Dict[str, str]] = []
+    probes: List[Dict[str, object]] = []
+    active: List[str] = []
+    for source, url in candidate_items:
+        if url in seen:
+            continue
+        seen.add(url)
+        unique_candidates.append({"url": url, "source": source})
         res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=800_000)
-        inspected.append(url)
-        if res.status == 200 and "xml" in parse_content_type(res.headers):
-            alive.append(url)
+        ctype = parse_content_type(res.headers)
+        ok = res.status == 200 and "xml" in ctype
+        reason = "ok" if ok else ("non_200" if res.status != 200 else "non_xml_content_type")
+        probes.append(
+            {
+                "url": url,
+                "source": source,
+                "status": res.status,
+                "content_type": ctype,
+                "ok": ok,
+                "reason": reason,
+            }
+        )
+        if ok:
+            active.append(url)
+
+    return {
+        "robots_status": robots_res.status,
+        "robots_sitemap_count": len(robots_candidates),
+        "candidates_total": len(seen),
+        "candidates": unique_candidates,
+        "probes": probes,
+        "active_sitemaps": active,
+        "selected_source_priority": ["robots", "default", "homepage_hint"],
+    }
+
+
+def discover_sitemaps(base_url: str, timeout: int, user_agent: str) -> Tuple[List[str], List[str]]:
+    diag = discover_sitemaps_with_diagnostics(base_url=base_url, timeout=timeout, user_agent=user_agent)
+    alive = [str(x) for x in diag.get("active_sitemaps", []) if isinstance(x, str)]
+    inspected = [str(item.get("url") or "") for item in diag.get("probes", []) if isinstance(item, dict)]
     return alive, inspected
 
 
@@ -2098,8 +2359,12 @@ def collect_urls_from_sitemaps(
     user_agent: str,
     max_sitemaps: int = 30,
     max_urls: int = 600,
+    discovery_diag: Optional[Dict[str, object]] = None,
 ) -> List[str]:
-    sitemap_urls, _ = discover_sitemaps(base_url, timeout, user_agent)
+    if discovery_diag and isinstance(discovery_diag.get("active_sitemaps"), list):
+        sitemap_urls = [str(x) for x in discovery_diag.get("active_sitemaps", []) if isinstance(x, str)]
+    else:
+        sitemap_urls, _ = discover_sitemaps(base_url, timeout, user_agent)
     if not sitemap_urls:
         return []
 
@@ -2141,6 +2406,128 @@ def collect_urls_from_sitemaps(
     return urls
 
 
+def detect_platform(
+    base_url: str,
+    home_response: FetchResult,
+    robots_response: Optional[FetchResult] = None,
+) -> Dict[str, object]:
+    _ = base_url
+    scores: Dict[str, float] = {k: 0.0 for k in PLATFORM_DETECTABLE}
+    evidence: List[Dict[str, object]] = []
+
+    def add_signal(platform: str, weight: float, reason: str) -> None:
+        if platform not in scores:
+            return
+        scores[platform] += float(weight)
+        evidence.append({"platform": platform, "weight": round(float(weight), 2), "reason": reason})
+
+    body = (home_response.body or "").lower()
+    ctype = parse_content_type(home_response.headers)
+    if "html" in ctype:
+        if "wp-content" in body or "wp-includes" in body or "/wp-json" in body:
+            add_signal("wordpress", 1.0, "homepage_wp_assets_or_routes")
+        if "content=\"wordpress" in body:
+            add_signal("wordpress", 0.9, "meta_generator_wordpress")
+
+        if ".myshopify.com" in body or "cdn.shopify.com" in body:
+            add_signal("shopify", 1.0, "shopify_domain_or_assets")
+        if "shopify-digital-wallet" in body or "shopify.theme" in body:
+            add_signal("shopify", 0.8, "shopify_runtime_markers")
+
+        if "webflow" in body and ("webflow.js" in body or "w-webflow-badge" in body):
+            add_signal("webflow", 1.0, "webflow_runtime_markers")
+        elif "webflow" in body:
+            add_signal("webflow", 0.6, "webflow_text_marker")
+
+        if "/ghost/api/" in body or "content=\"ghost" in body or "ghost.io" in body:
+            add_signal("ghost", 1.0, "ghost_runtime_markers")
+
+    if robots_response is not None and robots_response.status == 200:
+        robots_body = (robots_response.body or "").lower()
+        if "wp-admin" in robots_body:
+            add_signal("wordpress", 0.6, "robots_wp_admin_rule")
+        if "shopify" in robots_body:
+            add_signal("shopify", 0.4, "robots_shopify_marker")
+        if "/ghost/" in robots_body:
+            add_signal("ghost", 0.4, "robots_ghost_marker")
+
+    ranking = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top_platform, top_score = ranking[0]
+    second_score = ranking[1][1] if len(ranking) > 1 else 0.0
+
+    if top_score <= 0:
+        return {
+            "platform": "custom",
+            "confidence": 0.2,
+            "scores": scores,
+            "evidence": evidence,
+        }
+
+    confidence = 0.55
+    if top_score >= 3:
+        confidence = 0.9
+    elif top_score >= 2:
+        confidence = 0.8
+    elif top_score >= 1:
+        confidence = 0.7
+
+    if top_score - second_score < 0.5:
+        confidence = max(0.5, confidence - 0.15)
+
+    return {
+        "platform": top_platform,
+        "confidence": round(confidence, 2),
+        "scores": scores,
+        "evidence": evidence,
+    }
+
+
+def should_enforce_wordpress_only_checks(platform: str, confidence: float) -> bool:
+    return platform == "wordpress" and confidence >= PLATFORM_CONFIDENCE_STRICT
+
+
+def get_rule_list(rules: Dict[str, object], path: List[str], fallback: List[str]) -> List[str]:
+    current: object = rules
+    for key in path:
+        if not isinstance(current, dict):
+            return list(fallback)
+        current = current.get(key)
+    if not isinstance(current, list):
+        return list(fallback)
+    out: List[str] = []
+    for item in current:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out or list(fallback)
+
+
+def build_adapter_for_platform(
+    platform: str,
+    base_url: str,
+    timeout: int,
+    user_agent: str,
+    output_dir: Optional[Path],
+    extra_low_patterns: Optional[List[str]] = None,
+    webhook_url: str = "",
+    webhook_token: str = "",
+) -> GeoAdapterContract:
+    normalized = (platform or "custom").strip().lower()
+    kwargs = {
+        "base_url": base_url,
+        "timeout": timeout,
+        "user_agent": user_agent,
+        "output_dir": output_dir,
+        "extra_low_patterns": extra_low_patterns or [],
+        "webhook_url": webhook_url,
+        "webhook_token": webhook_token,
+    }
+    if normalized == "shopify":
+        return ShopifyReadOnlyAdapter(**kwargs)
+    if normalized in {"webflow", "ghost", "custom"}:
+        return GenericHttpReadOnlyAdapter(**kwargs)
+    return StandaloneWebAdapter(**kwargs)
+
+
 def is_low_value_url(url: str, extra_patterns: Optional[List[str]] = None) -> bool:
     path = safe_path(url).lower()
     full = url.lower()
@@ -2151,11 +2538,11 @@ def is_low_value_url(url: str, extra_patterns: Optional[List[str]] = None) -> bo
     return False
 
 
-def pick_first_article_url(urls: List[str], base_url: str) -> Optional[str]:
+def pick_first_article_url(urls: List[str], base_url: str, extra_low_patterns: Optional[List[str]] = None) -> Optional[str]:
     for u in urls:
         if u.rstrip("/") == base_url.rstrip("/"):
             continue
-        if is_low_value_url(u):
+        if is_low_value_url(u, extra_patterns=extra_low_patterns):
             continue
         if len((urlparse(u).path or "").strip("/")) < 2:
             continue
@@ -2519,8 +2906,32 @@ def endpoint_check(base_url: str, path: str, timeout: int, user_agent: str) -> T
     return res, ok
 
 
-def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dict[str, object]:
+def run_scan(
+    base_url: str,
+    timeout: int,
+    user_agent: str,
+    max_urls: int,
+    rules_config: Optional[Dict[str, object]] = None,
+    platform_profile: str = "auto",
+) -> Dict[str, object]:
     checks: List[CheckResult] = []
+    rules = deep_merge_dict(DEFAULT_RULES_CONFIG, rules_config or {})
+    selected_profile = (platform_profile or "auto").strip().lower()
+    if selected_profile not in SUPPORTED_PLATFORM_PROFILES:
+        selected_profile = "auto"
+
+    extra_low_patterns = get_rule_list(rules, ["low_value_patterns"], [])
+    low_value_candidates_raw = get_rule_list(
+        rules,
+        ["noindex_policy", "low_value_probe_paths"],
+        list(DEFAULT_RULES_CONFIG["noindex_policy"]["low_value_probe_paths"]),  # type: ignore[index]
+    )
+    low_value_candidates = [p if p.startswith("/") else f"/{p}" for p in low_value_candidates_raw]
+    article_schema_fields = get_rule_list(
+        rules,
+        ["schema_requirements", "article_required_fields"],
+        list(DEFAULT_RULES_CONFIG["schema_requirements"]["article_required_fields"]),  # type: ignore[index]
+    )
 
     robots_res, robots_ok = endpoint_check(base_url, "/robots.txt", timeout, user_agent)
     robots_ct = parse_content_type(robots_res.headers)
@@ -2544,10 +2955,80 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
         )
     )
 
-    sitemap_paths = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"]
-    for path in sitemap_paths:
+    home = fetch_url(base_url + "/", timeout=timeout, user_agent=user_agent, max_bytes=1_500_000)
+    if selected_profile == "auto":
+        platform_info = detect_platform(base_url=base_url, home_response=home, robots_response=robots_res)
+    else:
+        platform_info = {
+            "platform": selected_profile,
+            "confidence": 1.0,
+            "scores": {selected_profile: 1.0},
+            "evidence": [{"platform": selected_profile, "weight": 1.0, "reason": "cli_platform_profile_override"}],
+        }
+    platform = str(platform_info.get("platform") or "custom").lower()
+    platform_confidence = float(platform_info.get("confidence") or 0.0)
+    wp_enforced = should_enforce_wordpress_only_checks(platform, platform_confidence)
+
+    discovery_diag = discover_sitemaps_with_diagnostics(
+        base_url=base_url,
+        timeout=timeout,
+        user_agent=user_agent,
+        robots_response=robots_res,
+        homepage_response=home,
+    )
+    active_sitemaps = [str(x) for x in discovery_diag.get("active_sitemaps", []) if isinstance(x, str)]
+    active_sources = sorted(
+        {
+            str(item.get("source") or "")
+            for item in discovery_diag.get("probes", [])
+            if isinstance(item, dict) and bool(item.get("ok"))
+        }
+    )
+    has_any_active_sitemap = bool(active_sitemaps)
+
+    checks.append(
+        CheckResult(
+            key="sitemap_discovery",
+            category="endpoint",
+            status="pass" if has_any_active_sitemap else "warn",
+            message="Sitemap discovery found active endpoints."
+            if has_any_active_sitemap
+            else "Sitemap discovery did not find active XML endpoints.",
+            details={
+                "active_count": len(active_sitemaps),
+                "active_sources": active_sources,
+                "candidates_total": discovery_diag.get("candidates_total", 0),
+            },
+        )
+    )
+
+    default_required = get_rule_list(
+        rules,
+        ["platform_overrides", "default", "required_sitemap_paths"],
+        ["/sitemap.xml", "/sitemap_index.xml"],
+    )
+    wp_required = get_rule_list(
+        rules,
+        ["platform_overrides", "wordpress", "required_sitemap_paths"],
+        ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"],
+    )
+    required_paths: List[str] = []
+    for raw in default_required + wp_required:
+        p = raw.strip()
+        if not p:
+            continue
+        if not p.startswith("/"):
+            p = "/" + p
+        if p not in required_paths:
+            required_paths.append(p)
+
+    for path in required_paths:
         res, ok = endpoint_check(base_url, path, timeout, user_agent)
         ctype = parse_content_type(res.headers)
+        wp_only = path == "/wp-sitemap.xml" or (path in wp_required and path not in default_required)
+        enforce = (not wp_only) or wp_enforced
+        applicability = "wordpress-only" if wp_only else "global"
+
         if ok and "xml" in ctype:
             state = "pass"
             msg = f"{path} returns 200 XML."
@@ -2555,15 +3036,30 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
             state = "warn"
             msg = f"{path} returns 200 but Content-Type is not XML."
         else:
-            state = "fail"
-            msg = f"{path} is not reachable with status 200."
+            if not enforce:
+                state = "warn"
+                msg = f"{path} not reachable; skipped as optional non-WordPress endpoint."
+            elif has_any_active_sitemap and path in default_required:
+                state = "warn"
+                source_text = ", ".join(active_sources) if active_sources else "discovery"
+                msg = f"{path} not reachable, but sitemap discovery found active endpoints via {source_text}."
+            else:
+                state = "fail"
+                msg = f"{path} is not reachable with status 200."
+
         checks.append(
             CheckResult(
-                key=f"sitemap_{path.strip('/').replace('.', '_')}",
+                key=f"sitemap_{path.strip('/').replace('.', '_').replace('-', '_')}",
                 category="endpoint",
                 status=state,
                 message=msg,
-                details={"url": f"{base_url}{path}", "status": res.status, "content_type": ctype},
+                details={
+                    "url": f"{base_url}{path}",
+                    "status": res.status,
+                    "content_type": ctype,
+                    "wp_enforced": wp_enforced,
+                },
+                applicability=applicability,
             )
         )
 
@@ -2590,7 +3086,6 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
             )
         )
 
-    home = fetch_url(base_url + "/", timeout=timeout, user_agent=user_agent, max_bytes=1_500_000)
     if home.status != 200 or "html" not in parse_content_type(home.headers):
         checks.append(
             CheckResult(
@@ -2732,8 +3227,14 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
             )
         )
 
-    urls = collect_urls_from_sitemaps(base_url, timeout, user_agent, max_urls=max_urls)
-    article_url = pick_first_article_url(urls, base_url)
+    urls = collect_urls_from_sitemaps(
+        base_url,
+        timeout,
+        user_agent,
+        max_urls=max_urls,
+        discovery_diag=discovery_diag,
+    )
+    article_url = pick_first_article_url(urls, base_url, extra_low_patterns=extra_low_patterns)
     if not article_url:
         checks.append(
             CheckResult(
@@ -2775,8 +3276,7 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
                     )
                 )
             else:
-                need = ["author", "datePublished", "dateModified", "publisher"]
-                missing = [k for k in need if not article_schema.get(k)]
+                missing = [k for k in article_schema_fields if not article_schema.get(k)]
                 checks.append(
                     CheckResult(
                         key="article_schema",
@@ -2785,17 +3285,10 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
                         message="Sampled article schema has key fields."
                         if not missing
                         else f"Sampled article schema missing fields: {', '.join(missing)}",
-                        details={"url": article_url, "missing": missing},
+                        details={"url": article_url, "missing": missing, "required": article_schema_fields},
                     )
                 )
 
-    low_value_candidates = [
-        "/wp-login.php",
-        "/login",
-        "/register",
-        "/lost-password",
-        "/sample-page",
-    ]
     checked_count = 0
     issue_count = 0
     for path in low_value_candidates:
@@ -2816,8 +3309,8 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
                 key="low_value_noindex",
                 category="signal",
                 status="pass",
-                message="No low-value 200 pages found from default probes.",
-                details={},
+                message="No low-value 200 pages found from configured probes.",
+                details={"probe_paths": low_value_candidates},
             )
         )
     elif issue_count > 0:
@@ -2827,7 +3320,7 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
                 category="signal",
                 status="warn",
                 message="Some low-value pages are indexable; consider noindex.",
-                details={"checked_pages": checked_count, "indexable_pages": issue_count},
+                details={"checked_pages": checked_count, "indexable_pages": issue_count, "probe_paths": low_value_candidates},
             )
         )
     else:
@@ -2837,7 +3330,7 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
                 category="signal",
                 status="pass",
                 message="Checked low-value pages are noindex-protected.",
-                details={"checked_pages": checked_count},
+                details={"checked_pages": checked_count, "probe_paths": low_value_candidates},
             )
         )
 
@@ -2857,6 +3350,12 @@ def run_scan(base_url: str, timeout: int, user_agent: str, max_urls: int) -> Dic
             "generated_at_utc": now_utc(),
             "tool": "geo-llms-toolkit standalone-cli",
             "version": TOOL_VERSION,
+            "platform": platform,
+            "platform_confidence": round(platform_confidence, 2),
+            "platform_profile": selected_profile,
+            "platform_scores": platform_info.get("scores", {}),
+            "platform_evidence": platform_info.get("evidence", []),
+            "discovery": discovery_diag,
         },
         "summary": {
             "overall": overall,
@@ -3180,23 +3679,31 @@ def to_markdown_report(report: Dict[str, object]) -> str:
     meta = report["meta"]
     summary = report["summary"]
     checks = report["checks"]
+    discovery = meta.get("discovery", {}) if isinstance(meta.get("discovery"), dict) else {}
+    active_sitemaps = discovery.get("active_sitemaps", []) if isinstance(discovery.get("active_sitemaps"), list) else []
 
     lines = [
         f"# GEO Scan Report - {meta['target']}",
         "",
         f"- Generated (UTC): {meta['generated_at_utc']}",
         f"- Tool: {meta['tool']} {meta['version']}",
+        f"- Platform: {meta.get('platform', 'custom')} (confidence={meta.get('platform_confidence', 0)})",
+        f"- Platform Profile: {meta.get('platform_profile', 'auto')}",
+        f"- Rules File: {meta.get('rules_file', '') or '(default rules)'}",
+        f"- Active Sitemaps Discovered: {len(active_sitemaps)}",
         f"- Overall: **{summary['overall'].upper()}**",
         f"- Pass/Warn/Fail: {summary['pass']}/{summary['warn']}/{summary['fail']}",
         "",
         "## Checks",
         "",
-        "| Key | Category | Status | Message |",
-        "| --- | --- | --- | --- |",
+        "| Key | Category | Applicability | Status | Message |",
+        "| --- | --- | --- | --- | --- |",
     ]
     for c in checks:
         message = str(c["message"]).replace("|", "\\|")
-        lines.append(f"| {c['key']} | {c['category']} | {str(c['status']).upper()} | {message} |")
+        lines.append(
+            f"| {c['key']} | {c['category']} | {c.get('applicability', 'global')} | {str(c['status']).upper()} | {message} |"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -3205,9 +3712,18 @@ def to_csv_report(report: Dict[str, object]) -> str:
 
     buf = StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["key", "category", "status", "message", "details_json"])
+    writer.writerow(["key", "category", "applicability", "status", "message", "details_json"])
     for c in report["checks"]:
-        writer.writerow([c["key"], c["category"], c["status"], c["message"], json.dumps(c["details"], ensure_ascii=False)])
+        writer.writerow(
+            [
+                c["key"],
+                c["category"],
+                c.get("applicability", "global"),
+                c["status"],
+                c["message"],
+                json.dumps(c["details"], ensure_ascii=False),
+            ]
+        )
     return buf.getvalue()
 
 
@@ -4659,7 +5175,18 @@ def handle_index(args: argparse.Namespace) -> int:
 
 def handle_scan(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.target)
-    report = run_scan(base_url, timeout=args.timeout, user_agent=args.user_agent, max_urls=args.max_urls)
+    rules, rules_file_path, rules_warnings = load_rules_config(args.rules_file or "")
+    report = run_scan(
+        base_url,
+        timeout=args.timeout,
+        user_agent=args.user_agent,
+        max_urls=args.max_urls,
+        rules_config=rules,
+        platform_profile=args.platform_profile,
+    )
+    report_meta = report.setdefault("meta", {})
+    report_meta["rules_file"] = rules_file_path or ""
+    report_meta["rules_warnings"] = rules_warnings
     content = render_scan_output(report, args.format)
 
     if args.output:
@@ -4930,7 +5457,25 @@ def handle_llms(args: argparse.Namespace) -> int:
 def handle_adapter_check(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.target)
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else None
-    adapter = StandaloneWebAdapter(
+    profile = (args.platform_profile or "auto").strip().lower()
+    if profile not in SUPPORTED_PLATFORM_PROFILES:
+        profile = "auto"
+
+    homepage_probe = fetch_url(f"{base_url}/", timeout=args.timeout, user_agent=args.user_agent, max_bytes=600_000)
+    robots_probe = fetch_url(f"{base_url}/robots.txt", timeout=args.timeout, user_agent=args.user_agent, max_bytes=200_000)
+    if profile == "auto":
+        platform_info = detect_platform(base_url=base_url, home_response=homepage_probe, robots_response=robots_probe)
+    else:
+        platform_info = {
+            "platform": profile,
+            "confidence": 1.0,
+            "scores": {profile: 1.0},
+            "evidence": [{"platform": profile, "weight": 1.0, "reason": "cli_platform_profile_override"}],
+        }
+
+    platform = str(platform_info.get("platform") or "custom").lower()
+    adapter = build_adapter_for_platform(
+        platform=platform,
         base_url=base_url,
         timeout=args.timeout,
         user_agent=args.user_agent,
@@ -4941,6 +5486,7 @@ def handle_adapter_check(args: argparse.Namespace) -> int:
     )
 
     site = adapter.get_site_identity()
+    capabilities = adapter.get_capabilities()
     high_pages = adapter.list_high_value_pages(args.limit)
     low_pages = adapter.list_low_value_pages(args.limit)
     home_resp = adapter.fetch(
@@ -4953,6 +5499,10 @@ def handle_adapter_check(args: argparse.Namespace) -> int:
             "generated_at_utc": now_utc(),
             "tool": "geo-llms-toolkit standalone-cli",
             "version": TOOL_VERSION,
+            "platform": platform,
+            "platform_confidence": platform_info.get("confidence", 0.0),
+            "platform_scores": platform_info.get("scores", {}),
+            "platform_evidence": platform_info.get("evidence", []),
         },
         "site": {
             "name": site.name,
@@ -4964,6 +5514,11 @@ def handle_adapter_check(args: argparse.Namespace) -> int:
             "low_value_pages": len(low_pages),
             "homepage_status": home_resp.status,
             "homepage_content_type": parse_content_type(home_resp.headers),
+            "capabilities": {
+                "can_write_index_files": capabilities.can_write_index_files,
+                "can_auto_fix": capabilities.can_auto_fix,
+                "can_purge_cache": capabilities.can_purge_cache,
+            },
         },
         "samples": {
             "high_value_urls": [p.url for p in high_pages[:10]],
@@ -4979,10 +5534,12 @@ def handle_adapter_check(args: argparse.Namespace) -> int:
             "",
             f"- Generated (UTC): {report['meta']['generated_at_utc']}",
             f"- Site name: {site.name}",
+            f"- Platform: {report['meta']['platform']} (confidence={report['meta']['platform_confidence']})",
             f"- High value pages: {report['summary']['high_value_pages']}",
             f"- Low value pages: {report['summary']['low_value_pages']}",
             f"- Homepage status: {report['summary']['homepage_status']}",
             f"- Homepage content-type: {report['summary']['homepage_content_type']}",
+            f"- Capabilities: write_index={capabilities.can_write_index_files}, auto_fix={capabilities.can_auto_fix}, purge_cache={capabilities.can_purge_cache}",
             "",
             "## High Value URLs",
         ]
@@ -5009,7 +5566,18 @@ def handle_all(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    report = run_scan(base_url, timeout=args.timeout, user_agent=args.user_agent, max_urls=args.max_urls)
+    rules, rules_file_path, rules_warnings = load_rules_config(args.rules_file or "")
+    report = run_scan(
+        base_url,
+        timeout=args.timeout,
+        user_agent=args.user_agent,
+        max_urls=args.max_urls,
+        rules_config=rules,
+        platform_profile=args.platform_profile,
+    )
+    report_meta = report.setdefault("meta", {})
+    report_meta["rules_file"] = rules_file_path or ""
+    report_meta["rules_warnings"] = rules_warnings
     report_body = render_scan_output(report, args.report_format)
     ext = "md" if args.report_format == "markdown" else args.report_format
     report_path = output_dir / f"geo-scan-report.{ext}"
@@ -5051,6 +5619,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--output", help="Write report to a file path.")
     scan_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     scan_p.add_argument("--max-urls", type=int, default=220, help="Max sitemap URLs for schema sampling.")
+    scan_p.add_argument("--rules-file", help="Rules JSON file path. Default: ./.geo-rules.json when present.")
+    scan_p.add_argument(
+        "--platform-profile",
+        choices=sorted(SUPPORTED_PLATFORM_PROFILES),
+        default="auto",
+        help="Platform profile for scan checks. default: auto detection.",
+    )
     scan_p.add_argument("--user-agent", default=DEFAULT_UA)
     scan_p.set_defaults(func=handle_scan)
 
@@ -5071,6 +5646,12 @@ def build_parser() -> argparse.ArgumentParser:
     adapter_check_p.add_argument("--webhook-url", help="Optional webhook URL for adapter notification channel.")
     adapter_check_p.add_argument("--webhook-token", help="Optional webhook token for adapter notification channel.")
     adapter_check_p.add_argument("--output-dir", help="Optional output dir for adapter write-index-files checks.")
+    adapter_check_p.add_argument(
+        "--platform-profile",
+        choices=sorted(SUPPORTED_PLATFORM_PROFILES),
+        default="auto",
+        help="Platform profile for adapter selection. default: auto detection.",
+    )
     adapter_check_p.add_argument("--output", help="Write adapter check report to file path.")
     adapter_check_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     adapter_check_p.add_argument("--user-agent", default=DEFAULT_UA)
@@ -5082,6 +5663,13 @@ def build_parser() -> argparse.ArgumentParser:
     all_p.add_argument("--report-format", choices=["markdown", "json", "csv"], default="markdown")
     all_p.add_argument("--max-items", type=int, default=120)
     all_p.add_argument("--max-urls", type=int, default=220)
+    all_p.add_argument("--rules-file", help="Rules JSON file path. Default: ./.geo-rules.json when present.")
+    all_p.add_argument(
+        "--platform-profile",
+        choices=sorted(SUPPORTED_PLATFORM_PROFILES),
+        default="auto",
+        help="Platform profile for scan checks. default: auto detection.",
+    )
     all_p.add_argument("--exclude-pattern", action="append", help="Extra regex pattern(s) to exclude URL.")
     all_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     all_p.add_argument("--user-agent", default=DEFAULT_UA)

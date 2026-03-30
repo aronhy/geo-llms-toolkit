@@ -1,0 +1,38 @@
+{
+  "low_value_patterns": [],
+  "keyword_quality": {
+    "drop_low_specificity": false
+  },
+  "noindex_policy": {
+    "low_value_probe_paths": [
+      "/wp-login.php",
+      "/login",
+      "/register",
+      "/lost-password",
+      "/sample-page"
+    ]
+  },
+  "schema_requirements": {
+    "article_required_fields": [
+      "author",
+      "datePublished",
+      "dateModified",
+      "publisher"
+    ]
+  },
+  "platform_overrides": {
+    "default": {
+      "required_sitemap_paths": [
+        "/sitemap.xml",
+        "/sitemap_index.xml"
+      ]
+    },
+    "wordpress": {
+      "required_sitemap_paths": [
+        "/sitemap.xml",
+        "/sitemap_index.xml",
+        "/wp-sitemap.xml"
+      ]
+    }
+  }
+}

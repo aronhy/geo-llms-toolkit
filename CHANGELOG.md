@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
 
+## [0.16.0] - 2026-03-31
+
+### Added
+
+- Universal scan upgrade (CLI):
+- sitemap discovery chain: `robots.txt Sitemap` -> default paths -> homepage sitemap/feed hints
+- discovery diagnostics in scan output (`meta.discovery`)
+- platform fingerprinting (`wordpress/shopify/webflow/ghost/custom`) with confidence + evidence
+- scan applicability field (`checks[*].applicability`) for platform-conditional checks
+- rules center: root `.geo-rules.json` with blocks:
+- `low_value_patterns`
+- `keyword_quality`
+- `noindex_policy`
+- `schema_requirements`
+- `platform_overrides`
+- new scan/all flags:
+- `--rules-file`
+- `--platform-profile auto|wordpress|shopify|webflow|ghost|custom`
+- adapter capability model:
+- `AdapterCapabilities`
+- `GeoAdapterContract.get_capabilities()`
+- new read-only adapters in standalone:
+- `ShopifyReadOnlyAdapter`
+- `GenericHttpReadOnlyAdapter`
+
+### Changed
+
+- `wp-sitemap.xml` is no longer a hard-fail driver for non-WordPress sites.
+- `adapter-check` now auto-selects adapter by platform fingerprint and reports capabilities.
+- Standalone CLI runtime version bumped to `0.16.0`.
+
 ## [0.15.0] - 2026-03-25
 
 ### Added
