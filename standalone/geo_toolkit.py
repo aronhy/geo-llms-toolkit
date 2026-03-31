@@ -3753,6 +3753,7 @@ def to_monitor_markdown(report: Dict[str, object]) -> str:
         f"- Provider: {meta['provider']}",
         f"- Provider chain: {provider_chain_text}",
         f"- Weights: overlap={meta.get('weights', {}).get('keyword_overlap', '-')}, coappear={meta.get('weights', {}).get('serp_coappear', '-')}, pressure={meta.get('weights', {}).get('rank_pressure', '-')}",
+        f"- Rules File: {meta.get('rules_file', '') or '(default rules)'}",
         f"- Keywords: {summary['keywords_total']} (brand={summary['keywords_brand']}, non-brand={summary['keywords_non_brand']})",
         f"- Keywords with SERP data: {summary['keywords_with_serp_results']}",
         f"- Data coverage: {summary.get('data_coverage_pct', 0)}%",
@@ -3766,6 +3767,12 @@ def to_monitor_markdown(report: Dict[str, object]) -> str:
         lines.append(f"- Retries per provider: {diagnostics.get('retries')}")
     if diagnostics.get("backoff_ms") is not None:
         lines.append(f"- Retry backoff: {diagnostics.get('backoff_ms')}ms")
+    keyword_quality = meta.get("keyword_quality", {}) if isinstance(meta.get("keyword_quality"), dict) else {}
+    if keyword_quality:
+        lines.append(
+            f"- Keyword Quality: drop_low_specificity={bool(keyword_quality.get('drop_low_specificity', False))} "
+            f"(source={keyword_quality.get('source', '-')})"
+        )
     if keyword_load_stats:
         lines.append(
             f"- Keyword load: raw={keyword_load_stats.get('raw_total', 0)}, kept={keyword_load_stats.get('kept_total', 0)}, "
@@ -5205,6 +5212,16 @@ def handle_monitor(args: argparse.Namespace) -> int:
     inferred_brand = [p for p in re.split(r"[-_.]", target_domain.split(".")[0]) if len(p) >= 2]
     brand_tokens = sorted({t.lower() for t in (args.brand_token or []) + inferred_brand})
 
+    rules, rules_file_path, rules_warnings = load_rules_config(args.rules_file or "")
+    keyword_quality_cfg = rules.get("keyword_quality", {}) if isinstance(rules.get("keyword_quality"), dict) else {}
+    default_drop_low_specificity = bool(keyword_quality_cfg.get("drop_low_specificity", False))
+    if bool(args.keep_low_specificity_keywords):
+        drop_low_specificity = False
+    elif bool(args.drop_low_specificity_keywords):
+        drop_low_specificity = True
+    else:
+        drop_low_specificity = default_drop_low_specificity
+
     keywords_path = Path(args.keywords_file).expanduser().resolve()
     weights_file = Path(args.weights_file).expanduser().resolve() if args.weights_file else None
     weights = load_monitor_weights(weights_file)
@@ -5212,7 +5229,7 @@ def handle_monitor(args: argparse.Namespace) -> int:
         keywords_path,
         brand_tokens=brand_tokens,
         max_keywords=args.max_keywords,
-        drop_low_specificity=args.drop_low_specificity_keywords,
+        drop_low_specificity=drop_low_specificity,
     )
     report = run_monitor(
         base_url=base_url,
@@ -5230,6 +5247,15 @@ def handle_monitor(args: argparse.Namespace) -> int:
         max_discovered=args.max_discovered,
         weights=weights,
     )
+    report_meta = report.setdefault("meta", {})
+    report_meta["rules_file"] = rules_file_path or ""
+    report_meta["rules_warnings"] = rules_warnings
+    report_meta["keyword_quality"] = {
+        "drop_low_specificity": drop_low_specificity,
+        "source": "cli"
+        if bool(args.keep_low_specificity_keywords) or bool(args.drop_low_specificity_keywords)
+        else "rules_or_default",
+    }
     content = render_monitor_output(report, args.format)
 
     if args.output:
@@ -5695,10 +5721,17 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_p.add_argument("--serp-retries", type=int, default=1, help="Retry count per provider when SERP fetch fails.")
     monitor_p.add_argument("--serp-backoff-ms", type=int, default=350, help="Backoff milliseconds between retries.")
     monitor_p.add_argument("--max-keywords", type=int, default=100, help="Max keywords loaded from file.")
-    monitor_p.add_argument(
+    monitor_p.add_argument("--rules-file", help="Rules JSON file path. Default: ./.geo-rules.json when present.")
+    keyword_quality_group = monitor_p.add_mutually_exclusive_group()
+    keyword_quality_group.add_argument(
         "--drop-low-specificity-keywords",
         action="store_true",
         help="Drop low-specificity generic keywords (single-token/all-generic) during keyword loading.",
+    )
+    keyword_quality_group.add_argument(
+        "--keep-low-specificity-keywords",
+        action="store_true",
+        help="Force keep low-specificity keywords even if rules file enables dropping.",
     )
     monitor_p.add_argument("--weights-file", help="JSON weights file: keyword_overlap/serp_coappear/rank_pressure.")
     monitor_p.add_argument("--history-dir", default=".geo-history", help="Directory to store JSON snapshots.")

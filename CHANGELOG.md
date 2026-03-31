@@ -22,6 +22,10 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - new scan/all flags:
 - `--rules-file`
 - `--platform-profile auto|wordpress|shopify|webflow|ghost|custom`
+- monitor rules integration:
+- `geo monitor --rules-file`
+- `keyword_quality.drop_low_specificity` can be driven by rules file
+- `--keep-low-specificity-keywords` override switch
 - adapter capability model:
 - `AdapterCapabilities`
 - `GeoAdapterContract.get_capabilities()`

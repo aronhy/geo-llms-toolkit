@@ -34,6 +34,7 @@ chmod +x geo
 ./geo monitor aronhouyu.com \
   --keywords-file ./examples/keywords.txt \
   --discover-competitors \
+  --rules-file ./.geo-rules.json \
   --serp-provider auto \
   --serp-retries 2 \
   --serp-backoff-ms 500 \
@@ -71,8 +72,9 @@ chmod +x geo
 - `geo monitor`: 关键词维度竞品监控 + 优先级动作建议
   - 支持 `--serp-provider auto|bing|duckduckgo-lite`（默认 `auto`）
   - 支持 `--serp-retries` 与 `--serp-backoff-ms`，并在 JSON 里输出抓取失败诊断
+  - 支持 `--rules-file`，可从 `.geo-rules.json.keyword_quality` 读取过滤策略
   - 支持关键词清洗诊断：去重、规范化、低质量词识别（`diagnostics.keyword_load_stats`）
-  - 可选 `--drop-low-specificity-keywords` 自动过滤过泛词
+  - 可选 `--drop-low-specificity-keywords` / `--keep-low-specificity-keywords` 覆盖规则文件
 - `geo outreach plan/run/status/verify/update`: 外联计划、执行、状态跟踪、回访
 - `geo index discover/track/submit/audit/report`: 收录发现、跟踪、提交、诊断、周报
 

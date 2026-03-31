@@ -47,7 +47,7 @@ chmod +x geo
 # 网络受限时可切换或回退 SERP provider
 ./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --serp-provider auto --serp-retries 2 --serp-backoff-ms 500
 # 自动过滤过泛关键词（可选）
-./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --drop-low-specificity-keywords
+./geo monitor aronhouyu.com --keywords-file ./examples/keywords.txt --rules-file ./.geo-rules.json --drop-low-specificity-keywords
 ./geo outreach plan --monitor-report ./output/monitor.json --pitch-url https://aronhouyu.com --output-dir ./output
 ./geo index discover aronhouyu.com --output ./output/index-discover.json --format json
 ./geo index track aronhouyu.com --discover-report ./output/index-discover.json --output ./output/index-track.json --format json
@@ -67,7 +67,9 @@ CLI 命令组：
 - `--serp-provider auto|bing|duckduckgo-lite`（默认 `auto`，先 Bing 后 DuckDuckGo Lite）
 - `--serp-retries`（默认 `1`）
 - `--serp-backoff-ms`（默认 `350`）
+- `--rules-file`（可让 `keyword_quality` 从 `.geo-rules.json` 生效）
 - `--drop-low-specificity-keywords`（自动过滤 single-token / all-generic 过泛词）
+- `--keep-low-specificity-keywords`（覆盖规则文件，强制不过滤）
 
 `monitor` 结果里的 `diagnostics` 新增：
 
