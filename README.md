@@ -149,6 +149,9 @@ php -l adapters/wordpress/languages/index.php
 # CLI 语法检查
 python3 -m py_compile standalone/geo_toolkit.py core/python/adapter_contract.py
 
+# 跨平台扫描回归（非WP不应因 wp-sitemap.xml 硬失败）
+./scripts/check-universal-scan-regression.sh
+
 # 重新打包 WordPress ZIP
 ./scripts/build-wordpress-zip.sh
 

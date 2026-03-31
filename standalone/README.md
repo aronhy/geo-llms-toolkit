@@ -99,3 +99,4 @@ chmod +x geo
 - `index submit` 先做小批量
 - 保留 `.geo-history`，用于趋势分析与回归排查
 - 根目录维护 `.geo-rules.json`，把低价值页/noindex/schema检查改成配置驱动
+- 发布前执行 `./scripts/check-universal-scan-regression.sh` 做跨平台回归

@@ -26,6 +26,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - `geo monitor --rules-file`
 - `keyword_quality.drop_low_specificity` can be driven by rules file
 - `--keep-low-specificity-keywords` override switch
+- regression script:
+- `scripts/check-universal-scan-regression.sh`
 - adapter capability model:
 - `AdapterCapabilities`
 - `GeoAdapterContract.get_capabilities()`
