@@ -64,6 +64,7 @@ chmod +x geo
 
 - `geo scan`: 基础 GEO/SEO 信号与端点检查
   - 支持 sitemap 自动发现：`robots.txt -> 默认路径 -> 首页线索`
+  - 支持 `.xml.gz` sitemap（含 `application/octet-stream` 的 gzip 内容）
   - 支持平台识别：`wordpress/shopify/webflow/ghost/custom`
   - 支持 `--platform-profile` 强制指定与 `--rules-file` 规则配置
   - 报告新增：`meta.discovery`、`meta.platform*`、`checks[*].applicability`

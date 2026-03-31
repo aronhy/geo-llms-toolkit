@@ -80,6 +80,7 @@ CLI 命令组：
 
 - `--rules-file`（默认会自动读取根目录 `.geo-rules.json`）
 - `--platform-profile auto|wordpress|shopify|webflow|ghost|custom`
+- sitemap 发现支持 `.xml.gz`（含 `application/octet-stream` 的 gzip sitemap）
 - `scan` 输出新增：`meta.platform`、`meta.platform_confidence`、`meta.discovery`、`checks[*].applicability`
 
 ## WordPress 插件快速开始

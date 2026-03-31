@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import sys
 import textwrap
 import time
 import xml.etree.ElementTree as ET
+import zlib
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -413,6 +415,59 @@ def parse_content_type(headers: Dict[str, str]) -> str:
     return headers.get("content-type", "").lower()
 
 
+def looks_like_xml_payload(text: str) -> bool:
+    snippet = (text or "").lstrip()[:300].lower()
+    return snippet.startswith("<?xml") or snippet.startswith("<urlset") or snippet.startswith("<sitemapindex")
+
+
+def is_xml_response_payload(res: "FetchResult") -> bool:
+    ctype = parse_content_type(res.headers)
+    if "xml" in ctype:
+        return True
+    return looks_like_xml_payload(res.body)
+
+
+def decode_response_body(raw: bytes, headers: Dict[str, str], url: str, max_bytes: int) -> str:
+    payload = raw
+    encoding = headers.get("content-encoding", "").lower()
+    path = urlparse(url).path.lower()
+    gzip_hint = "gzip" in encoding or path.endswith(".gz") or raw.startswith(b"\x1f\x8b")
+
+    if gzip_hint and raw:
+        inflated: bytes = b""
+        try:
+            inflated = gzip.decompress(raw)
+        except Exception:
+            # Best effort for truncated gzip payloads.
+            try:
+                decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                inflated = decompressor.decompress(raw, max_bytes + 1)
+            except Exception:
+                inflated = b""
+        if inflated:
+            payload = inflated
+
+    if len(payload) > max_bytes:
+        payload = payload[:max_bytes]
+
+    ctype = headers.get("content-type", "")
+    charset_match = re.search(r"charset=([^\s;]+)", ctype, flags=re.I)
+    charset = charset_match.group(1).strip("\"'") if charset_match else "utf-8"
+
+    preferred = [charset, "utf-8", "utf-16", "gb18030", "latin-1"]
+    seen: set = set()
+    for enc in preferred:
+        key = (enc or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            return payload.decode(enc)
+        except Exception:
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
 def deep_merge_dict(base: Dict[str, object], patch: Dict[str, object]) -> Dict[str, object]:
     out = deepcopy(base)
     for key, value in patch.items():
@@ -475,10 +530,7 @@ def fetch_url(
             raw = resp.read(max_bytes + 1)
             if len(raw) > max_bytes:
                 raw = raw[:max_bytes]
-            ctype = headers.get("content-type", "")
-            charset_match = re.search(r"charset=([^\s;]+)", ctype, flags=re.I)
-            charset = charset_match.group(1).strip("\"'") if charset_match else "utf-8"
-            body = raw.decode(charset, errors="replace")
+            body = decode_response_body(raw=raw, headers=headers, url=url, max_bytes=max_bytes)
             final_url = getattr(resp, "geturl", lambda: url)()
             return FetchResult(url=url, final_url=final_url, status=code, headers=headers, body=body)
     except HTTPError as e:
@@ -2220,16 +2272,41 @@ def parse_sitemap_xml(xml_text: str) -> Tuple[str, List[str]]:
     if root_name == "urlset":
         for node in root.iter():
             if localname(node.tag).lower() == "loc" and node.text:
-                locs.append(node.text.strip())
+                locs.append(normalize_sitemap_loc(node.text))
         return "urlset", locs
 
     if root_name == "sitemapindex":
         for node in root.iter():
             if localname(node.tag).lower() == "loc" and node.text:
-                locs.append(node.text.strip())
+                locs.append(normalize_sitemap_loc(node.text))
         return "sitemapindex", locs
 
     raise ValueError("unsupported sitemap format")
+
+
+def normalize_sitemap_loc(raw_loc: str) -> str:
+    value = unescape((raw_loc or "").strip())
+    nested_absolute = re.match(r"^https?://[^/]+/(https?://.+)$", value, flags=re.I)
+    if nested_absolute:
+        return nested_absolute.group(1).strip()
+    return value
+
+
+def parse_sitemap_xml_best_effort(xml_text: str) -> Tuple[str, List[str]]:
+    try:
+        return parse_sitemap_xml(xml_text)
+    except Exception:
+        lower = (xml_text or "").lower()
+        if "<sitemapindex" in lower:
+            kind = "sitemapindex"
+        elif "<urlset" in lower:
+            kind = "urlset"
+        else:
+            raise
+        locs = [normalize_sitemap_loc(m) for m in re.findall(r"<loc>\s*([^<]+?)\s*</loc>", xml_text, flags=re.I)]
+        if not locs:
+            raise
+        return kind, locs
 
 
 def extract_sitemap_urls_from_robots(robots_body: str, base_url: str) -> List[str]:
@@ -2320,14 +2397,21 @@ def discover_sitemaps_with_diagnostics(
         unique_candidates.append({"url": url, "source": source})
         res = fetch_url(url, timeout=timeout, user_agent=user_agent, max_bytes=800_000)
         ctype = parse_content_type(res.headers)
-        ok = res.status == 200 and "xml" in ctype
-        reason = "ok" if ok else ("non_200" if res.status != 200 else "non_xml_content_type")
+        xml_payload = is_xml_response_payload(res)
+        ok = res.status == 200 and xml_payload
+        if ok:
+            reason = "ok" if "xml" in ctype else "xml_payload_non_xml_content_type"
+        elif res.status != 200:
+            reason = "non_200"
+        else:
+            reason = "non_xml_payload"
         probes.append(
             {
                 "url": url,
                 "source": source,
                 "status": res.status,
                 "content_type": ctype,
+                "xml_payload": xml_payload,
                 "ok": ok,
                 "reason": reason,
             }
@@ -2381,11 +2465,10 @@ def collect_urls_from_sitemaps(
         res = fetch_url(current, timeout=timeout, user_agent=user_agent, max_bytes=2_000_000)
         if res.status != 200:
             continue
-        ctype = parse_content_type(res.headers)
-        if "xml" not in ctype:
+        if not is_xml_response_payload(res):
             continue
         try:
-            kind, locs = parse_sitemap_xml(res.body)
+            kind, locs = parse_sitemap_xml_best_effort(res.body)
         except Exception:
             continue
         if kind == "sitemapindex":
@@ -3029,9 +3112,13 @@ def run_scan(
         enforce = (not wp_only) or wp_enforced
         applicability = "wordpress-only" if wp_only else "global"
 
-        if ok and "xml" in ctype:
+        xml_payload = is_xml_response_payload(res)
+        if ok and ("xml" in ctype or xml_payload):
             state = "pass"
-            msg = f"{path} returns 200 XML."
+            if "xml" in ctype:
+                msg = f"{path} returns 200 XML."
+            else:
+                msg = f"{path} returns 200 with XML payload (non-standard Content-Type)."
         elif ok:
             state = "warn"
             msg = f"{path} returns 200 but Content-Type is not XML."
@@ -3057,6 +3144,7 @@ def run_scan(
                     "url": f"{base_url}{path}",
                     "status": res.status,
                     "content_type": ctype,
+                    "xml_payload": xml_payload,
                     "wp_enforced": wp_enforced,
                 },
                 applicability=applicability,
